@@ -132,8 +132,6 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
-    initCharts();
-
+    // 초기 렌더링 (setTimeout 안에서 호출됨)
     console.log('✅ 대시보드 초기화 완료!');
-}, 500); // setTimeout 닫기
-});
+}); // DOMContentLoaded 끝
