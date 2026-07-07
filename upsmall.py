@@ -78,6 +78,60 @@ def print_table(rows):
         print()
 
 
+def write_excel(rows, path="summary.xlsx", sheet_title="집계"):
+    """이미지 표와 동일한 모양(병합 셀)으로 실제 .xlsx 파일 생성"""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_title
+
+    thin = Side(style="thin", color="000000")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    header_font = Font(bold=True)
+
+    headers = ["발송항목", "대상 기간", "대상 사업장", "진행 상태"]
+    for col, text in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col, value=text)
+        cell.font = header_font
+        cell.alignment = center
+        cell.border = border
+
+    r = 2
+    for row in rows:
+        entries = row["대상 사업장"] if row["대상 사업장"] else ["-"]
+        span = len(entries)
+        start_row, end_row = r, r + span - 1
+
+        for col, val in ((1, row["발송항목"]), (2, row["대상 기간"]), (4, row["진행 상태"])):
+            ws.cell(row=start_row, column=col, value=val)
+            if span > 1:
+                ws.merge_cells(start_row=start_row, start_column=col, end_row=end_row, end_column=col)
+
+        for i, entry in enumerate(entries):
+            c = ws.cell(row=start_row + i, column=3, value=entry)
+            c.alignment = center
+            c.border = border
+
+        for rr in range(start_row, end_row + 1):
+            for col in (1, 2, 4):
+                cell = ws.cell(row=rr, column=col)
+                cell.alignment = center
+                cell.border = border
+
+        r = end_row + 1
+
+    widths = [14, 16, 18, 14]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    wb.save(path)
+    return path
+
+
 def to_paste_text(rows):
     """
     엑셀/워드에 그대로 복붙 가능한 tab-separated 텍스트로 변환.
@@ -128,3 +182,6 @@ if __name__ == "__main__":
     print_table(result)
     print("--- 복붙용 (탭 구분) ---")
     print(to_paste_text(result))
+
+    out_path = write_excel(result, "/mnt/user-data/outputs/사업장_집계.xlsx")
+    print(f"엑셀 저장 완료: {out_path}")
