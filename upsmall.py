@@ -1,27 +1,53 @@
 """
-JS 배열(발송 대상 레코드) -> 엑셀 요약표 형식으로 자동 집계
+hgc.js 읽기 -> 사후/뇌심직무/Item1~4 집계 -> 발송현황.xlsx 생성
 
-규칙
-----
-1. '사후' 행: 전체 레코드를 종건/예건으로 나눠 집계
-2. '뇌심 직무' 행: items[0] 또는 items[1] 이 True 인 레코드만 필터링 후 집계
-3. 레코드에 status='complete' 가 하나라도 있으면 "완료수/전체수" 형식 + 진행상태 '발송완료'
-   전부 status='target' 이면 "전체수" 형식만 + 진행상태 '발송예정'
+사용법:
+    python3 make_report.py data/hgc.js [출력경로.xlsx]
+    (출력경로 생략 시 ./발송현황.xlsx 로 저장)
 """
 
+import sys
+import json
+import re
 from datetime import datetime
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+# 발송항목 정의: (표시 이름, 레코드 필터 함수)
+CATEGORIES = [
+    ("사후", lambda r: True),
+    ("뇌심 직무", lambda r: r["items"][0] or r["items"][1]),
+    ("Item1", lambda r: r["items"][0]),
+    ("Item2", lambda r: r["items"][1]),
+    ("Item3", lambda r: r["items"][2]),
+    ("Item4", lambda r: r["items"][3]),
+]
 
 
-def _fmt_date(iso_date: str) -> str:
-    d = datetime.strptime(iso_date, "%Y-%m-%d")
-    return f"{d.month}/{d.day}"
+def load_records_from_js(path):
+    """'const 변수 = [ {...} ];' 형태 js 파일 또는 순수 JSON 배열 파일을 읽어 레코드 리스트 반환"""
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    start, end = text.find("["), text.rfind("]")
+    if start == -1 or end == -1:
+        raise ValueError("배열 형태([...])를 파일에서 찾지 못했습니다.")
+
+    array_text = re.sub(r",\s*([\]}])", r"\1", text[start:end + 1])  # trailing comma 제거
+    return json.loads(array_text)
+
+
+def _fmt_period(records):
+    if not records:
+        return ""
+    d1 = datetime.strptime(records[0]["periodStart"], "%Y-%m-%d")
+    d2 = datetime.strptime(records[0]["periodEnd"], "%Y-%m-%d")
+    return f"{d1.month}/{d1.day}~{d2.month}/{d2.day}"
 
 
 def _count_by_jongye(records):
-    counts = {
-        "종건": {"complete": 0, "total": 0},
-        "예건": {"complete": 0, "total": 0},
-    }
+    counts = {"종건": {"complete": 0, "total": 0}, "예건": {"complete": 0, "total": 0}}
     for r in records:
         jy = r["jongYe"]
         counts[jy]["total"] += 1
@@ -30,60 +56,33 @@ def _count_by_jongye(records):
     return counts
 
 
-def _build_row(label, records, period_start, period_end):
-    counts = _count_by_jongye(records)
-    has_complete = any(r["status"] == "complete" for r in records)
-
-    lines = []
-    for jy in ("종건", "예건"):
-        c = counts[jy]
-        if c["total"] == 0:
-            continue
-        if has_complete:
-            lines.append(f"{jy} {c['complete']}/{c['total']}")
-        else:
-            lines.append(f"{jy} {c['total']}")
-
-    return {
-        "발송항목": label,
-        "대상 기간": f"{_fmt_date(period_start)}~{_fmt_date(period_end)}",
-        "대상 사업장": lines,  # 리스트로 반환 (엑셀 셀에서는 줄바꿈으로 표시)
-        "진행 상태": "발송완료" if has_complete else "발송예정",
-    }
-
-
-def aggregate(records, period_start=None, period_end=None):
-    """records: JS에서 넘어온 dict 리스트 (status/jongYe/workplace/items 등 포함)"""
-    if not records:
-        return []
-
-    ps = period_start or records[0]["periodStart"]
-    pe = period_end or records[0]["periodEnd"]
-
+def aggregate(records):
+    """CATEGORIES 별로 종건/예건 완료·대상 건수를 집계해서 표 행 리스트로 반환"""
     rows = []
-    rows.append(_build_row("사후", records, ps, pe))
+    for label, cond in CATEGORIES:
+        filtered = [r for r in records if cond(r)]
+        counts = _count_by_jongye(filtered)
+        has_complete = any(r["status"] == "complete" for r in filtered)
 
-    noesim = [r for r in records if r["items"][0] or r["items"][1]]
-    rows.append(_build_row("뇌심 직무", noesim, ps, pe))
+        lines = []
+        for jy in ("종건", "예건"):
+            c = counts[jy]
+            if c["total"] == 0:
+                continue
+            lines.append(f"{jy} {c['complete']}/{c['total']}")
 
+        status = "-" if not filtered else ("발송완료" if has_complete else "발송예정")
+
+        rows.append({
+            "발송항목": label,
+            "대상 기간": _fmt_period(filtered) or _fmt_period(records),
+            "대상 사업장": lines if lines else ["-"],
+            "진행 상태": status,
+        })
     return rows
 
 
-def print_table(rows):
-    """콘솔에서 이미지 표처럼 미리보기"""
-    for row in rows:
-        print(f"[{row['발송항목']}] 기간: {row['대상 기간']}  상태: {row['진행 상태']}")
-        for line in row["대상 사업장"]:
-            print(f"   {line}")
-        print()
-
-
-def write_excel(rows, path="summary.xlsx", sheet_title="집계"):
-    """이미지 표와 동일한 모양(병합 셀)으로 실제 .xlsx 파일 생성"""
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, Alignment, Border, Side
-    from openpyxl.utils import get_column_letter
-
+def write_excel(rows, path="발송현황.xlsx", sheet_title="발송현황"):
     wb = Workbook()
     ws = wb.active
     ws.title = sheet_title
@@ -91,18 +90,17 @@ def write_excel(rows, path="summary.xlsx", sheet_title="집계"):
     thin = Side(style="thin", color="000000")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    header_font = Font(bold=True)
 
     headers = ["발송항목", "대상 기간", "대상 사업장", "진행 상태"]
     for col, text in enumerate(headers, start=1):
         cell = ws.cell(row=1, column=col, value=text)
-        cell.font = header_font
+        cell.font = Font(bold=True)
         cell.alignment = center
         cell.border = border
 
     r = 2
     for row in rows:
-        entries = row["대상 사업장"] if row["대상 사업장"] else ["-"]
+        entries = row["대상 사업장"]
         span = len(entries)
         start_row, end_row = r, r + span - 1
 
@@ -124,64 +122,22 @@ def write_excel(rows, path="summary.xlsx", sheet_title="집계"):
 
         r = end_row + 1
 
-    widths = [14, 16, 18, 14]
-    for i, w in enumerate(widths, start=1):
+    for i, w in enumerate([14, 16, 18, 14], start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
     wb.save(path)
     return path
 
 
-def to_paste_text(rows):
-    """
-    엑셀/워드에 그대로 복붙 가능한 tab-separated 텍스트로 변환.
-    발송항목/대상기간/진행상태는 첫 줄에만 쓰고, 종건/예건은 두 줄로 나눠
-    대상 사업장 칸만 채운다. (엑셀에 붙여넣은 뒤 세로 병합만 수동으로 하면 이미지와 동일)
-    """
-    lines = ["발송항목\t대상 기간\t대상 사업장\t진행 상태"]
-    for row in rows:
-        entries = row["대상 사업장"] if row["대상 사업장"] else ["-"]
-        for i, entry in enumerate(entries):
-            if i == 0:
-                lines.append(f"{row['발송항목']}\t{row['대상 기간']}\t{entry}\t{row['진행 상태']}")
-            else:
-                lines.append(f"\t\t{entry}\t")
-    return "\n".join(lines)
-
-
 if __name__ == "__main__":
-    # 사용자가 준 예시 데이터
-    sample_records = [
-        {
-            "status": "complete",
-            "fileDate": "2026-07-12",
-            "fileTimestamp": "2026-07-12 13:29:39",
-            "periodStart": "2026-06-15",
-            "periodEnd": "2026-06-30",
-            "jongYe": "종건",
-            "workplace": "애플/직원",
-            "receive": 5,
-            "report": True,
-            "items": [False, False, False, False],
-        },
-        {
-            "status": "target",
-            "fileDate": "2026-07-11",
-            "fileTimestamp": "2026-07-11 13:29:39",
-            "periodStart": "2026-06-15",
-            "periodEnd": "2026-06-30",
-            "jongYe": "종건",
-            "workplace": "구글/직원",
-            "receive": 19,
-            "report": True,
-            "items": [True, True, False, False],
-        },
-    ]
+    if len(sys.argv) < 2:
+        print("사용법: python3 make_report.py hgc.js경로 [출력xlsx경로]")
+        sys.exit(1)
 
-    result = aggregate(sample_records)
-    print_table(result)
-    print("--- 복붙용 (탭 구분) ---")
-    print(to_paste_text(result))
+    js_path = sys.argv[1]
+    out_path = sys.argv[2] if len(sys.argv) > 2 else "발송현황.xlsx"
 
-    out_path = write_excel(result, "/mnt/user-data/outputs/사업장_집계.xlsx")
-    print(f"엑셀 저장 완료: {out_path}")
+    records = load_records_from_js(js_path)
+    rows = aggregate(records)
+    saved = write_excel(rows, out_path)
+    print(f"완료: {saved}")
