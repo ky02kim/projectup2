@@ -47,11 +47,17 @@ def _fmt_period(records):
 
 
 def _count_by_jongye(records):
+    """
+    total(대상)은 status=='target' 레코드 수만 세고,
+    complete(완료)는 status=='complete' 레코드 수만 센다.
+    같은 사업장이 complete/target 두 줄로 각각 들어있는 구조를 전제로 함.
+    """
     counts = {"종건": {"complete": 0, "total": 0}, "예건": {"complete": 0, "total": 0}}
     for r in records:
         jy = r["jongYe"]
-        counts[jy]["total"] += 1
-        if r["status"] == "complete":
+        if r["status"] == "target":
+            counts[jy]["total"] += 1
+        elif r["status"] == "complete":
             counts[jy]["complete"] += 1
     return counts
 
@@ -130,35 +136,30 @@ def write_excel(rows, path="발송현황.xlsx", sheet_title="발송현황"):
 
 
 if __name__ == "__main__":
+    import os
     import tkinter as tk
-    from tkinter import filedialog, messagebox
+    from tkinter import messagebox
 
     root = tk.Tk()
-    root.withdraw()  # 메인 창은 숨기고 대화상자만 사용
+    root.withdraw()
 
     try:
-        js_path = filedialog.askopenfilename(
-            title="hgc.js 파일 선택",
-            filetypes=[("JS/JSON 파일", "*.js *.json"), ("모든 파일", "*.*")],
-        )
-        if not js_path:
-            messagebox.showinfo("취소", "파일을 선택하지 않아 종료합니다.")
-            sys.exit(0)
+        # exe(또는 .py) 파일이 있는 폴더를 기준으로 경로를 잡음 (더블클릭 시 작업 폴더가 달라져도 안전)
+        if getattr(sys, "frozen", False):
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
 
-        out_path = filedialog.asksaveasfilename(
-            title="발송현황.xlsx 저장 위치",
-            defaultextension=".xlsx",
-            initialfile="발송현황.xlsx",
-            filetypes=[("Excel 파일", "*.xlsx")],
-        )
-        if not out_path:
-            messagebox.showinfo("취소", "저장 위치를 선택하지 않아 종료합니다.")
-            sys.exit(0)
+        js_path = os.path.join(base_dir, "data", "hgc.js")
 
         records = load_records_from_js(js_path)
         rows = aggregate(records)
-        saved = write_excel(rows, out_path)
 
+        d1 = datetime.strptime(records[0]["periodStart"], "%Y-%m-%d")
+        d2 = datetime.strptime(records[0]["periodEnd"], "%Y-%m-%d")
+        out_path = os.path.join(base_dir, f"집계 {d1.month}.{d1.day}-{d2.month}.{d2.day}.xlsx")
+
+        saved = write_excel(rows, out_path)
         messagebox.showinfo("완료", f"엑셀 파일이 생성되었습니다:\n{saved}")
     except Exception as e:
         messagebox.showerror("오류 발생", str(e))
