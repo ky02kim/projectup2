@@ -130,14 +130,35 @@ def write_excel(rows, path="발송현황.xlsx", sheet_title="발송현황"):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("사용법: python3 make_report.py hgc.js경로 [출력xlsx경로]")
-        sys.exit(1)
+    import tkinter as tk
+    from tkinter import filedialog, messagebox
 
-    js_path = sys.argv[1]
-    out_path = sys.argv[2] if len(sys.argv) > 2 else "발송현황.xlsx"
+    root = tk.Tk()
+    root.withdraw()  # 메인 창은 숨기고 대화상자만 사용
 
-    records = load_records_from_js(js_path)
-    rows = aggregate(records)
-    saved = write_excel(rows, out_path)
-    print(f"완료: {saved}")
+    try:
+        js_path = filedialog.askopenfilename(
+            title="hgc.js 파일 선택",
+            filetypes=[("JS/JSON 파일", "*.js *.json"), ("모든 파일", "*.*")],
+        )
+        if not js_path:
+            messagebox.showinfo("취소", "파일을 선택하지 않아 종료합니다.")
+            sys.exit(0)
+
+        out_path = filedialog.asksaveasfilename(
+            title="발송현황.xlsx 저장 위치",
+            defaultextension=".xlsx",
+            initialfile="발송현황.xlsx",
+            filetypes=[("Excel 파일", "*.xlsx")],
+        )
+        if not out_path:
+            messagebox.showinfo("취소", "저장 위치를 선택하지 않아 종료합니다.")
+            sys.exit(0)
+
+        records = load_records_from_js(js_path)
+        rows = aggregate(records)
+        saved = write_excel(rows, out_path)
+
+        messagebox.showinfo("완료", f"엑셀 파일이 생성되었습니다:\n{saved}")
+    except Exception as e:
+        messagebox.showerror("오류 발생", str(e))
