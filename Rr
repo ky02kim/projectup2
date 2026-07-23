@@ -1,0 +1,556 @@
+# =====================================================
+# 기업건강의학센터 업무실적 대시보드 — 통합 변환/리포트 스크립트 (R 버전)
+# =====================================================
+# convert.py(엑셀 -> JS 변환) + make_report.py(발송현황.xlsx 생성)를
+# 하나의 R 스크립트로 통합한 버전입니다.
+#
+# 사용법
+#   1. 이 스크립트를 아래 파일/폴더와 같은 위치에 둡니다.
+#        - 파일명에 "업무 실적"이 포함된 xlsx 1개   (KNX / 자료요청서)  ※ 정확한 이름 아니어도 됨
+#        - "*사후관리*집계*.xlsx" 파일 여러 개        (거래처별 사후관리)
+#   2. Rscript convert_report.R 로 실행합니다.
+#   3. 생성 결과
+#        - data/knx.js, data/req.js, data/hgc.js   (대시보드용, 기존과 동일)
+#        - "집계 M.D-M.D.xlsx"                       (발송현황 리포트, 기존 make_report.py와 동일)
+#
+# 데이터프레임 구조
+#   knx_df, req_df : date/y/m/d/workplace/jongYe/group/items/itemSum/... 컬럼
+#                    items = 9개, 값은 0 또는 1
+#   hgc_df         : status/fileDate/.../workplace/receive/report/items 컬럼
+#                    items = 4개, 값은 TRUE/FALSE   ※ itemSum 컬럼 없음 (knx/req와의 차이)
+#   -> 세 데이터프레임 모두 "items를 list-column으로 갖는" 동일한 구조를 따르되,
+#      items의 값 타입과 itemSum 유무만 원본 스펙대로 다릅니다.
+# =====================================================
+
+library(openxlsx)
+library(jsonlite)
+
+# ── 설정 ────────────────────────────────────────────────
+EXCEL_NAME_PATTERN <- "업무 실적"            # 파일명에 이 문자열이 포함되면 매칭 (② 요청사항)
+HGC_NAME_REGEX      <- "사후관리.*집계.*\\.xlsx$"
+OUTPUT_DIR           <- "data"
+
+HGC_COL <- c(E = 5, N = 14, V = 22, AB = 28, AC = 29, AD = 30, AE = 31)
+HGC_HEADER_ROW <- 6
+HGC_CONSECUTIVE_BLANK_LIMIT <- 30
+HGC_HARD_ROW_CAP <- 50000
+
+# ── 공통 헬퍼 ───────────────────────────────────────────
+
+# 파일명에 특정 문자열이 포함된 xlsx 파일을 찾는다 (엑셀 임시 잠금파일 "~$"는 제외)
+find_file_by_name <- function(base_dir, contains) {
+  files <- list.files(base_dir, pattern = "\\.xlsx$", full.names = TRUE, ignore.case = TRUE)
+  files <- files[!grepl("^~\\$", basename(files))]
+  matched <- files[grepl(contains, basename(files), fixed = TRUE)]
+  if (length(matched) == 0) return(NULL)
+  if (length(matched) > 1) {
+    cat(sprintf("       [경고] '%s' 포함 파일이 %d개 발견되어 가장 최근 파일을 사용합니다.\n",
+                contains, length(matched)))
+    matched <- matched[order(file.mtime(matched), decreasing = TRUE)]
+  }
+  matched[1]
+}
+
+# 셀 값을 안전하게 문자열로 변환 (날짜는 YYYY-MM-DD로 정규화)
+safe_str <- function(v) {
+  if (is.null(v) || length(v) == 0 || is.na(v)) return("")
+  if (inherits(v, c("Date", "POSIXct"))) {
+    d <- normalize_date(v)
+    return(if (is.null(d)) "" else d)
+  }
+  trimws(as.character(v))
+}
+
+# 다양한 형태의 날짜 값을 "YYYY-MM-DD" 문자열로 정규화 (실패 시 NULL)
+normalize_date <- function(v) {
+  if (is.null(v) || length(v) == 0 || is.na(v)) return(NULL)
+
+  if (inherits(v, c("Date", "POSIXct"))) {
+    y <- as.integer(format(v, "%Y")); m <- as.integer(format(v, "%m")); d <- as.integer(format(v, "%d"))
+    if (!is.na(y) && y >= 2020 && y <= 2050) return(sprintf("%04d-%02d-%02d", y, m, d))
+    return(NULL)
+  }
+
+  s <- trimws(as.character(v))
+  if (s == "") return(NULL)
+  s <- gsub("[/.]", "-", s)
+
+  if (nchar(s) >= 10) {
+    parts <- strsplit(substr(s, 1, 10), "-")[[1]]
+    if (length(parts) == 3) {
+      y <- suppressWarnings(as.integer(parts[1]))
+      m <- suppressWarnings(as.integer(parts[2]))
+      d <- suppressWarnings(as.integer(parts[3]))
+      if (!any(is.na(c(y, m, d))) && y >= 2020 && y <= 2050 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+        return(sprintf("%04d-%02d-%02d", y, m, d))
+      }
+    }
+  }
+  NULL
+}
+
+to_check    <- function(v) if (safe_str(v) == "1") 1L else 0L
+to_bool_yn  <- function(v) toupper(safe_str(v)) == "Y"
+to_int_safe <- function(v) {
+  if (is.null(v) || length(v) == 0 || is.na(v) || safe_str(v) == "") return(0L)
+  n <- suppressWarnings(as.integer(as.numeric(v)))
+  if (is.na(n)) 0L else n
+}
+
+# 레코드 리스트(파이썬 dict에 해당)를 items를 list-column으로 갖는 데이터프레임으로 변환
+records_to_df <- function(records) {
+  if (length(records) == 0) return(data.frame())
+  cols <- setdiff(names(records[[1]]), "items")
+  df <- data.frame(row.names = seq_along(records))
+  for (col in cols) df[[col]] <- unlist(lapply(records, function(r) r[[col]]))
+  df$items <- lapply(records, function(r) r$items)
+  df
+}
+
+# ── KNX 시트 파싱 (발송일자 A, 사업장명 C, 예/종건 D, 거래처구분 E, 항목 H~P) ──
+parse_knx <- function(raw) {
+  records <- list()
+  for (i in seq_len(nrow(raw))[-1]) {              # 2행부터 (1행은 헤더)
+    row <- raw[i, ]
+    date_val <- normalize_date(row[[1]])
+    if (is.null(date_val)) next
+    ymd <- as.integer(strsplit(date_val, "-")[[1]])
+    if (!(ymd[1] >= 2020 && ymd[1] <= 2050 && ymd[2] >= 1 && ymd[2] <= 12)) next
+
+    items <- vapply(8:16, function(c) if (c <= ncol(raw)) to_check(row[[c]]) else 0L, integer(1))
+
+    records[[length(records) + 1]] <- list(
+      date = date_val, y = ymd[1], m = ymd[2], d = ymd[3],
+      workplace = safe_str(if (ncol(raw) >= 3) row[[3]] else NA),
+      jongYe    = safe_str(if (ncol(raw) >= 4) row[[4]] else NA),
+      group     = safe_str(if (ncol(raw) >= 5) row[[5]] else NA),
+      items = items, itemSum = sum(items),
+      memo     = safe_str(if (ncol(raw) >= 17) row[[17]] else NA),
+      staff    = safe_str(if (ncol(raw) >= 18) row[[18]] else NA),
+      provType = safe_str(if (ncol(raw) >= 19) row[[19]] else NA)
+    )
+  }
+  records
+}
+
+# ── 자료요청서 시트 파싱 (발송일자 C, 사업장명 E, 예/종건 F, 거래처구분 G, 항목 K~S) ──
+parse_req <- function(raw) {
+  records <- list()
+  for (i in seq_len(nrow(raw))[-1]) {
+    row <- raw[i, ]
+    if (ncol(raw) < 3) next
+    date_val <- normalize_date(row[[3]])
+    if (is.null(date_val)) next
+    ymd <- as.integer(strsplit(date_val, "-")[[1]])
+    if (!(ymd[1] >= 2020 && ymd[1] <= 2050 && ymd[2] >= 1 && ymd[2] <= 12)) next
+
+    items <- vapply(11:19, function(c) if (c <= ncol(raw)) to_check(row[[c]]) else 0L, integer(1))
+
+    records[[length(records) + 1]] <- list(
+      date = date_val, y = ymd[1], m = ymd[2], d = ymd[3],
+      workplace = safe_str(if (ncol(raw) >= 5) row[[5]] else NA),
+      jongYe    = safe_str(if (ncol(raw) >= 6) row[[6]] else NA),
+      group     = safe_str(if (ncol(raw) >= 7) row[[7]] else NA),
+      items = items, itemSum = sum(items),
+      note   = safe_str(if (ncol(raw) >= 20) row[[20]] else NA),
+      sender = safe_str(if (ncol(raw) >= 21) row[[21]] else NA)
+    )
+  }
+  records
+}
+
+# ══════════════════════════════════════════════════════
+#  거래처별 사후관리 집계 전처리
+# ══════════════════════════════════════════════════════
+
+# 폴더 내 "*사후관리*집계*.xlsx" 파일 목록 + 파일명의 타임스탬프 추출
+find_hgc_files <- function(base_dir) {
+  files <- list.files(base_dir, pattern = "\\.xlsx$", full.names = TRUE, ignore.case = TRUE)
+  files <- files[!grepl("^~\\$", basename(files))]
+  files <- files[grepl(HGC_NAME_REGEX, basename(files), ignore.case = TRUE)]
+
+  out <- list()
+  for (p in files) {
+    fname <- basename(p)
+    m <- regmatches(fname, regexec("_([0-9]{14})\\.xlsx$", fname, ignore.case = TRUE))[[1]]
+    if (length(m) < 2) {
+      cat(sprintf("       [경고] 파일명에서 타임스탬프를 못 찾음 (건너뜀): %s\n", fname)); next
+    }
+    ts <- as.POSIXct(m[2], format = "%Y%m%d%H%M%S")
+    if (is.na(ts)) {
+      cat(sprintf("       [경고] 타임스탬프 파싱 실패 (건너뜀): %s\n", fname)); next
+    }
+    out[[length(out) + 1]] <- list(path = p, fname = fname, timestamp = ts)
+  }
+  out
+}
+
+# A2(종건/예건), A3(건진기간) 파싱
+# 전체 시트를 detectDates=TRUE로 읽으면 A열 전체가 날짜 타입으로 오인되어
+# A2/A3의 텍스트 값이 NA로 깨지는 경우가 있어, 이 두 셀만 별도로(detectDates=FALSE) 읽는다.
+parse_hgc_meta <- function(path) {
+  meta_raw <- tryCatch(
+    openxlsx::read.xlsx(path, sheet = 1, rows = 2:3, cols = 1,
+                         colNames = FALSE, skipEmptyRows = FALSE, detectDates = FALSE),
+    error = function(e) NULL
+  )
+  a2 <- safe_str(if (!is.null(meta_raw) && nrow(meta_raw) >= 1) meta_raw[1, 1] else NA)
+  a3 <- safe_str(if (!is.null(meta_raw) && nrow(meta_raw) >= 2) meta_raw[2, 1] else NA)
+
+  jong_ye <- if (grepl("종건", a2)) "종건" else if (grepl("예건", a2)) "예건" else NA
+
+  period_start <- period_end <- NULL
+  m <- regmatches(a3, regexec(
+    "([0-9]{4}[-./][0-9]{1,2}[-./][0-9]{1,2})\\s*~\\s*([0-9]{4}[-./][0-9]{1,2}[-./][0-9]{1,2})", a3))[[1]]
+  if (length(m) == 3) {
+    period_start <- normalize_date(m[2])
+    period_end   <- normalize_date(m[3])
+  }
+  list(jongYe = jong_ye, periodStart = period_start, periodEnd = period_end)
+}
+
+# 한 파일의 데이터 파싱. 필터: 노동부보고 == 'Y' AND 접수 >= 1 인 행만 사용
+parse_hgc_data <- function(raw) {
+  if (nrow(raw) < HGC_HEADER_ROW) return(list(itemLabels = c("AB", "AC", "AD", "AE"), rows = list()))
+  header <- raw[HGC_HEADER_ROW, ]
+
+  item_labels <- vapply(c("AB", "AC", "AD", "AE"), function(c) {
+    col <- HGC_COL[[c]]
+    v <- if (col <= ncol(raw)) safe_str(header[[col]]) else ""
+    if (v == "") c else v
+  }, character(1))
+
+  rows <- list()
+  consecutive_blank <- 0
+  last_row <- min(nrow(raw), HGC_HEADER_ROW + HGC_HARD_ROW_CAP)
+
+  for (i in seq(HGC_HEADER_ROW + 1, last_row)) {
+    row <- raw[i, ]
+    name_str <- safe_str(if (HGC_COL[["E"]] <= ncol(raw)) row[[HGC_COL[["E"]]]] else NA)
+    v_str    <- safe_str(if (HGC_COL[["V"]] <= ncol(raw)) row[[HGC_COL[["V"]]]] else NA)
+
+    if (name_str == "" && v_str == "") {
+      consecutive_blank <- consecutive_blank + 1
+      if (consecutive_blank >= HGC_CONSECUTIVE_BLANK_LIMIT) break
+      next
+    }
+    consecutive_blank <- 0
+
+    labor_report <- to_bool_yn(if (HGC_COL[["N"]] <= ncol(raw)) row[[HGC_COL[["N"]]]] else NA)
+    jeopsu <- to_int_safe(if (HGC_COL[["V"]] <= ncol(raw)) row[[HGC_COL[["V"]]]] else NA)
+
+    if (labor_report && jeopsu >= 1) {
+      items <- vapply(c("AB", "AC", "AD", "AE"), function(c) {
+        col <- HGC_COL[[c]]
+        to_bool_yn(if (col <= ncol(raw)) row[[col]] else NA)
+      }, logical(1))
+
+      rows[[length(rows) + 1]] <- list(
+        workplace = name_str, report = labor_report, receive = jeopsu, items = unname(items)
+      )
+    }
+  }
+  list(itemLabels = unname(item_labels), rows = rows)
+}
+
+# 폴더 내 모든 사후관리 집계 파일을 열어 메타 + 데이터 추출
+load_hgc_files <- function(base_dir) {
+  files <- find_hgc_files(base_dir)
+  cat(sprintf("       → 대상 파일 %d개 발견\n", length(files)))
+
+  parsed <- list()
+  for (f in files) {
+    cat(sprintf("       처리 중: %s\n", f$fname))
+    raw <- tryCatch(
+      openxlsx::read.xlsx(f$path, sheet = 1, colNames = FALSE, skipEmptyRows = FALSE, detectDates = TRUE),
+      error = function(e) NULL
+    )
+    if (is.null(raw)) { cat("           [오류] 처리 실패 (건너뜀)\n"); next }
+
+    meta <- parse_hgc_meta(f$path)
+    if (is.na(meta$jongYe) || is.null(meta$periodStart) || is.null(meta$periodEnd)) {
+      cat("           [경고] A2/A3 메타 파싱 실패 (건너뜀)\n"); next
+    }
+
+    parsed_data <- parse_hgc_data(raw)
+    parsed[[length(parsed) + 1]] <- list(
+      fname = f$fname, timestamp = f$timestamp,
+      jongYe = meta$jongYe, periodStart = meta$periodStart, periodEnd = meta$periodEnd,
+      itemLabels = parsed_data$itemLabels, rows = parsed_data$rows
+    )
+    cat(sprintf("           → %s, %s~%s, %d건\n",
+                meta$jongYe, meta$periodStart, meta$periodEnd, length(parsed_data$rows)))
+  }
+  parsed
+}
+
+# 같은 건진기간 + 종건/예건 + 거래처 기준으로 묶어, 가장 오래된 파일 = target, 가장 최신 파일 = complete
+group_hgc <- function(parsed_files) {
+  groups <- list()
+  for (pf in parsed_files) {
+    for (row in pf$rows) {
+      key <- paste(pf$periodStart, pf$periodEnd, pf$jongYe, row$workplace, sep = "|||")
+      entry <- list(timestamp = pf$timestamp, periodStart = pf$periodStart, periodEnd = pf$periodEnd,
+                    jongYe = pf$jongYe, workplace = row$workplace, receive = row$receive,
+                    report = row$report, items = row$items)
+      groups[[key]] <- c(groups[[key]], list(entry))
+    }
+  }
+
+  records <- list()
+  for (rows in groups) {
+    rows <- rows[order(vapply(rows, function(x) as.numeric(x$timestamp), numeric(1)))]
+    process_list <- if (length(rows) == 1) {
+      list(list(status = "target", r = rows[[1]]))
+    } else {
+      list(list(status = "target", r = rows[[1]]), list(status = "complete", r = rows[[length(rows)]]))
+    }
+
+    for (p in process_list) {
+      r <- p$r
+      records[[length(records) + 1]] <- list(
+        status = p$status,
+        fileDate = format(r$timestamp, "%Y-%m-%d"),
+        fileTimestamp = format(r$timestamp, "%Y-%m-%d %H:%M:%S"),
+        periodStart = r$periodStart, periodEnd = r$periodEnd, jongYe = r$jongYe,
+        workplace = r$workplace, receive = r$receive, report = r$report, items = r$items
+      )
+    }
+  }
+
+  # 건진기간 시작일 -> 종건/예건 -> 사업장 -> status 순 정렬
+  ord <- order(vapply(records, `[[`, character(1), "periodStart"),
+               vapply(records, `[[`, character(1), "jongYe"),
+               vapply(records, `[[`, character(1), "workplace"),
+               vapply(records, `[[`, character(1), "status"))
+  records[ord]
+}
+
+process_hgc <- function(base_dir) {
+  parsed <- load_hgc_files(base_dir)
+  if (length(parsed) == 0) {
+    cat("       [정보] 대상 파일이 없거나 모두 파싱 실패했습니다.\n")
+    return(list())
+  }
+  group_hgc(parsed)
+}
+
+# ── JS 파일 출력 (대시보드용) ──────────────────────────
+write_js <- function(filepath, var_name, data, generated_at) {
+  json_str <- jsonlite::toJSON(data, auto_unbox = TRUE, pretty = TRUE, na = "null")
+  content <- sprintf(
+    "/* 자동 생성 파일 - convert_report.R\n   생성 시각: %s\n   직접 수정하지 마세요. 엑셀 수정 후 스크립트를 다시 실행하세요. */\nwindow.%s = %s;\n",
+    generated_at, var_name, json_str
+  )
+  writeLines(content, filepath, useBytes = TRUE)
+}
+
+# ══════════════════════════════════════════════════════
+#  발송현황.xlsx 리포트 생성
+# ══════════════════════════════════════════════════════
+
+# 발송항목 정의: (표시 이름, 레코드 필터 함수) — items는 1=뇌심, 2=직무, 3=감정노동, 4=건진데이터
+CATEGORIES <- list(
+  list(label = "사후관리소견서", cond = function(r) TRUE),
+  list(label = "뇌심 · 직무",     cond = function(r) r$items[1] || r$items[2]),
+  list(label = "뇌심",           cond = function(r) r$items[1]),
+  list(label = "직무",           cond = function(r) r$items[2]),
+  list(label = "감정노동",       cond = function(r) r$items[3]),
+  list(label = "건진데이터",     cond = function(r) r$items[4])
+)
+
+fmt_period <- function(records) {
+  if (length(records) == 0) return("")
+  d1 <- as.Date(records[[1]]$periodStart); d2 <- as.Date(records[[1]]$periodEnd)
+  sprintf("%d/%d~%d/%d", as.integer(format(d1, "%m")), as.integer(format(d1, "%d")),
+          as.integer(format(d2, "%m")), as.integer(format(d2, "%d")))
+}
+
+# total(대상)은 status=='target', complete(완료)는 status=='complete' 레코드만 센다.
+# 같은 사업장이 complete/target 두 줄로 각각 들어있는 구조를 전제로 함.
+count_by_jongye <- function(records) {
+  counts <- list(종건 = list(complete = 0, total = 0), 예건 = list(complete = 0, total = 0))
+  for (r in records) {
+    jy <- r$jongYe
+    if (r$status == "target")   counts[[jy]]$total    <- counts[[jy]]$total + 1
+    if (r$status == "complete") counts[[jy]]$complete <- counts[[jy]]$complete + 1
+  }
+  counts
+}
+
+# CATEGORIES 별로 종건/예건 완료·대상 건수를 집계해 표 행 리스트로 반환
+aggregate_hgc <- function(records) {
+  rows <- list()
+  for (cat_def in CATEGORIES) {
+    filtered <- Filter(cat_def$cond, records)
+    counts <- count_by_jongye(filtered)
+    has_complete <- any(vapply(filtered, function(r) r$status == "complete", logical(1)))
+
+    lines <- c()
+    for (jy in c("종건", "예건")) {
+      c <- counts[[jy]]
+      if (c$total == 0) next
+      lines <- c(lines, if (c$complete == 0) sprintf("%s %d", jy, c$total)
+                 else sprintf("%s %d/%d", jy, c$complete, c$total))
+    }
+
+    status <- if (length(filtered) == 0) "-" else if (has_complete) "발송완료" else "발송예정"
+    period_txt <- fmt_period(filtered); if (period_txt == "") period_txt <- fmt_period(records)
+
+    rows[[length(rows) + 1]] <- list(
+      item = cat_def$label, period = period_txt,
+      workplaces = if (length(lines) == 0) "-" else lines,
+      status = status
+    )
+  }
+  rows
+}
+
+group_by_period <- function(records) {
+  groups <- list()
+  for (r in records) {
+    key <- paste(r$periodStart, r$periodEnd, sep = "|||")
+    groups[[key]] <- c(groups[[key]], list(r))
+  }
+  groups
+}
+
+sheet_name_for <- function(period_start, period_end) {
+  d1 <- as.Date(period_start); d2 <- as.Date(period_end)
+  sprintf("%d.%d-%d.%d", as.integer(format(d1, "%m")), as.integer(format(d1, "%d")),
+          as.integer(format(d2, "%m")), as.integer(format(d2, "%d")))
+}
+
+write_report_sheet <- function(wb, sheet, rows) {
+  addWorksheet(wb, sheet)
+  header_style <- createStyle(textDecoration = "bold", halign = "center", valign = "center",
+                               border = "TopBottomLeftRight", fgFill = "D9D9D9")
+  body_style <- createStyle(halign = "center", valign = "center", wrapText = TRUE,
+                             border = "TopBottomLeftRight")
+
+  headers <- c("발송항목", "대상 기간", "대상 사업장", "진행 상태")
+  writeData(wb, sheet, t(headers), startRow = 1, colNames = FALSE)
+  addStyle(wb, sheet, header_style, rows = 1, cols = 1:4, gridExpand = TRUE)
+
+  r <- 2
+  for (row in rows) {
+    entries <- row$workplaces
+    span <- length(entries)
+    start_row <- r; end_row <- r + span - 1
+
+    writeData(wb, sheet, row$item, startRow = start_row, startCol = 1, colNames = FALSE)
+    writeData(wb, sheet, row$period, startRow = start_row, startCol = 2, colNames = FALSE)
+    writeData(wb, sheet, row$status, startRow = start_row, startCol = 4, colNames = FALSE)
+    if (span > 1) {
+      mergeCells(wb, sheet, cols = 1, rows = start_row:end_row)
+      mergeCells(wb, sheet, cols = 2, rows = start_row:end_row)
+      mergeCells(wb, sheet, cols = 4, rows = start_row:end_row)
+    }
+
+    writeData(wb, sheet, entries, startRow = start_row, startCol = 3, colNames = FALSE)
+    addStyle(wb, sheet, body_style, rows = start_row:end_row, cols = 1:4, gridExpand = TRUE)
+
+    r <- end_row + 1
+  }
+
+  setColWidths(wb, sheet, cols = 1:4, widths = c(14, 16, 18, 14))
+}
+
+# 기간별로 시트를 나눠서 저장. 가장 최신 기간이 맨 앞 시트가 되도록 정렬
+write_report_excel <- function(records, path) {
+  groups <- group_by_period(records)
+  keys <- names(groups)
+  starts <- vapply(keys, function(k) strsplit(k, "\\|\\|\\|")[[1]][1], character(1))
+  keys <- keys[order(starts, decreasing = TRUE)]
+
+  wb <- createWorkbook()
+  for (key in keys) {
+    parts <- strsplit(key, "\\|\\|\\|")[[1]]
+    rows <- aggregate_hgc(groups[[key]])
+    write_report_sheet(wb, sheet_name_for(parts[1], parts[2]), rows)
+  }
+  saveWorkbook(wb, path, overwrite = TRUE)
+  path
+}
+
+# ══════════════════════════════════════════════════════
+#  메인
+# ══════════════════════════════════════════════════════
+main <- function() {
+  base_dir <- getwd()
+  output_dir <- file.path(base_dir, OUTPUT_DIR)
+  dir.create(output_dir, showWarnings = FALSE)
+  generated_at <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+
+  cat(strrep("=", 55), "\n", sep = "")
+  cat("  기업건강의학센터 업무실적 - 엑셀 변환기 + 리포트 (R 통합본)\n")
+  cat(strrep("=", 55), "\n", sep = "")
+
+  # ── "업무 실적" 포함 파일 -> KNX / 자료요청서 ──
+  knx_records <- list(); req_records <- list()
+  excel_path <- find_file_by_name(base_dir, EXCEL_NAME_PATTERN)
+  if (!is.null(excel_path)) {
+    cat(sprintf("\n엑셀 파일 읽는 중... %s\n", basename(excel_path)))
+    sheet_names <- tryCatch(openxlsx::getSheetNames(excel_path), error = function(e) character(0))
+    cat(sprintf("       시트 목록: %s\n", paste(sheet_names, collapse = ", ")))
+
+    if (length(sheet_names) >= 1) {
+      raw1 <- read.xlsx(excel_path, sheet = 1, colNames = FALSE, skipEmptyRows = FALSE, detectDates = TRUE)
+      knx_records <- parse_knx(raw1)
+      cat(sprintf("       → KNX %d건 파싱 완료\n", length(knx_records)))
+    }
+    if (length(sheet_names) >= 2) {
+      raw2 <- read.xlsx(excel_path, sheet = 2, colNames = FALSE, skipEmptyRows = FALSE, detectDates = TRUE)
+      req_records <- parse_req(raw2)
+      cat(sprintf("       → 자료요청서 %d건 파싱 완료\n", length(req_records)))
+    }
+  } else {
+    cat(sprintf("\n'%s' 포함 파일이 없어 건너뜁니다.\n", EXCEL_NAME_PATTERN))
+  }
+
+  knx_df <- records_to_df(knx_records)   # items(0/1, 9개) + itemSum 포함
+  req_df <- records_to_df(req_records)   # items(0/1, 9개) + itemSum 포함
+
+  write_js(file.path(output_dir, "knx.js"), "KNX_DATA", knx_records, generated_at)
+  write_js(file.path(output_dir, "req.js"), "REQ_DATA", req_records, generated_at)
+  cat(sprintf("       ✓ data/knx.js  (%d건)\n", length(knx_records)))
+  cat(sprintf("       ✓ data/req.js  (%d건)\n", length(req_records)))
+
+  # ── "*사후관리*집계*.xlsx" -> 거래처별 사후관리 ──
+  cat(sprintf("\n'%s' 패턴 파일 탐색 중...\n", HGC_NAME_REGEX))
+  hgc_records <- process_hgc(base_dir)
+  hgc_df <- records_to_df(hgc_records)   # items(TRUE/FALSE, 4개), itemSum 없음
+
+  write_js(file.path(output_dir, "hgc.js"), "HGC_DATA", hgc_records, generated_at)
+  cat(sprintf("       ✓ data/hgc.js  (%d개 기간 그룹)\n", length(hgc_records)))
+
+  # ── 발송현황.xlsx 리포트 생성 (hgc_records 재사용, 별도 파일 재읽기 없음) ──
+  report_path <- NULL
+  if (length(hgc_records) > 0) {
+    starts <- vapply(hgc_records, function(r) r$periodStart, character(1))
+    latest_rec <- hgc_records[[which.max(starts)]]
+    d1 <- as.Date(latest_rec$periodStart); d2 <- as.Date(latest_rec$periodEnd)
+    report_path <- file.path(base_dir, sprintf(
+      "집계 %d.%d-%d.%d.xlsx",
+      as.integer(format(d1, "%m")), as.integer(format(d1, "%d")),
+      as.integer(format(d2, "%m")), as.integer(format(d2, "%d"))
+    ))
+    write_report_excel(hgc_records, report_path)
+    cat(sprintf("       ✓ %s\n", basename(report_path)))
+  } else {
+    cat("       [정보] 사후관리 데이터가 없어 리포트를 생성하지 않았습니다.\n")
+  }
+
+  cat("\n", strrep("=", 55), "\n", sep = "")
+  cat("  변환 완료!\n")
+  cat(strrep("=", 55), "\n", sep = "")
+  cat(sprintf("  KNX 발송      : %5d건\n", length(knx_records)))
+  cat(sprintf("  자료요청서    : %5d건\n", length(req_records)))
+  cat(sprintf("  사후관리 그룹 : %5d개\n", length(hgc_records)))
+
+  invisible(list(knx_df = knx_df, req_df = req_df, hgc_df = hgc_df, report_path = report_path))
+}
+
+if (identical(environment(), globalenv())) {
+  result <- main()
+}
