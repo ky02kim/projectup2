@@ -1,0 +1,26 @@
+library(readxl)
+library(dplyr)
+library(stringr)
+library(writexl)
+
+df <- read_excel("원본.xlsx", sheet = "암의심")
+
+result <- df %>%
+  filter(
+    성별 == "여",
+    str_detect(거래처명 == "웰빙")
+    ) %>%
+  mutate(
+    검사명 = str_replace_all(검사명, c(
+      "유방 초음파" = "유방초음파",
+      "유초" = "유방초음파",
+      "유촬" = "유방촬영",
+      "상초" = "상복부초음파",
+      "갑초" = "갑상선초음파",
+      "위 내시경" = "위내시경",
+      "위내" = "위내시경"
+      )
+    )
+  ) %>%
+
+write_xlsx(df,"완료.xlsx")
