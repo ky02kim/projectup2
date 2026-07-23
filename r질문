@@ -4,23 +4,16 @@ library(stringr)
 library(writexl)
 
 df <- read_excel("원본.xlsx", sheet = "암의심")
+exam_map <- read_excel("매핑.xlsx", sheet = "Sheet1")
 
-result <- df %>%
-  filter(
-    성별 == "여",
-    str_detect(거래처명 == "웰빙")
-    ) %>%
-  mutate(
-    검사명 = str_replace_all(검사명, c(
-      "유방 초음파" = "유방초음파",
-      "유초" = "유방초음파",
-      "유촬" = "유방촬영",
-      "상초" = "상복부초음파",
-      "갑초" = "갑상선초음파",
-      "위 내시경" = "위내시경",
-      "위내" = "위내시경"
-      )
-    )
-  ) %>%
+df <- df %>%
+  left_join(exam_map, by = c("검사명" = "원본값"))%>%
+  mutate(검사명 = if_else(is.na(변경값), 검사명, 변경값))%>%
+  select(-변경값)
 
-write_xlsx(df,"완료.xlsx")
+company_map <-read_excel("매핑.xlsx", sheet = "Sheet2")
+df <- df %/%
+  left_join(company_map, by = c("거래처명" = "원본값"))
+
+
+wirte_xlsx(df,"결과.xlsx")
