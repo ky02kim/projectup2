@@ -1,698 +1,833 @@
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>기업건강의학센터 | 업무 현황</title>
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700&family=Roboto+Mono:wght@400;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="css/style.css">
-    <!-- 엑셀 변환 후 생성되는 데이터 파일 -->
-    <script src="data/knx.js"></script>
-    <script src="data/req.js"></script>
-    <script src="data/hgc.js"></script>
-</head>
-<body>
+/* ======================================================
+   기업건강의학센터 업무 현황 대시보드 — main.js
+   ====================================================== */
 
-<!-- ===== HEADER ===== -->
-<header class="main-header">
-    <div class="header-inner">
-        <div class="header-left">
-            <div class="logo-icon"><i class="fas fa-heartbeat"></i></div>
-            <div class="logo-text">
-                <span class="logo-main">기업건강의학센터</span>
-                <span class="logo-sub">업무 현황 대시보드</span>
-            </div>
-        </div>
-        <div class="header-right">
-            <div class="data-status" id="dataStatus">
-                <span class="status-dot idle"></span> 데이터 미로드
-            </div>
-            <div class="current-time" id="currentTime"></div>
-        </div>
-    </div>
-    <nav class="tab-nav">
-        <button class="tab-btn active" data-tab="tab-visual">
-            <i class="fas fa-chart-line"></i> 시각화 현황
-        </button>
-        <button class="tab-btn" data-tab="tab-upload">
-            <i class="fas fa-upload"></i> 데이터 입력
-        </button>
-        <button class="tab-btn" data-tab="tab-etc">
-            <i class="fas fa-clipboard-list"></i> 기타 업무
-        </button>
-    </nav>
-</header>
+// ── 상수 ─────────────────────────────────────────────
+// KNX 시트1: H(7)~P(15) = 9개 항목
+// 자료요청 시트2: K(10)~S(18) = 9개 항목
+const ITEM_LABELS = ['사후세로형','사후가로형','뇌심','직무','정신','동의자결과','사업장양식','사이트업로드','통계자료'];
+const PAGE      = 50;
+const API_BW    = 'tables/biweekly_report';
+const API_ETC   = 'tables/etc_work';
 
-<!-- ============================================================
-     TAB 1 : 시각화 현황
-     ============================================================ -->
-<main class="tab-content active" id="tab-visual">
-<div class="page-container">
+/* ── localStorage 헬퍼 ──────────────────────────────── */
+function lsUUID() {
+    try {
+        return crypto.randomUUID();
+    } catch(e) {
+        // fallback (구형 브라우저)
+        return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+            (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16));
+    }
+}
+function lsSave(key, record) {
+    const arr = lsLoad(key);
+    arr.push(record);
+    try {
+        localStorage.setItem(key, JSON.stringify(arr));
+    } catch(e) {
+        showToast('저장 공간이 부족합니다.', 'error');
+        console.error('[lsSave] 저장 실패:', e);
+    }
+}
+function lsLoad(key) {
+    try {
+        return JSON.parse(localStorage.getItem(key) || '[]');
+    } catch(e) {
+        console.warn('[lsLoad] 파싱 실패, 초기화:', key, e);
+        return [];
+    }
+}
+function lsDelete(key, id) {
+    const arr = lsLoad(key).filter(r => r.id !== id);
+    try {
+        localStorage.setItem(key, JSON.stringify(arr));
+    } catch(e) {
+        console.error('[lsDelete] 삭제 실패:', e);
+    }
+}
 
+// ── 색상 팔레트 (라이트 테마) ────────────────────────
+const C = {
+    blue:  'rgba(30,115,230,0.85)',   green: 'rgba(22,163,74,0.85)',
+    orange:'rgba(234,88,12,0.85)',    purple:'rgba(124,58,237,0.85)',
+    teal:  'rgba(13,148,136,0.85)',   red:   'rgba(220,38,38,0.85)',
+    yellow:'rgba(217,119,6,0.85)',    pink:  'rgba(219,39,119,0.85)',
+    sky:   'rgba(2,132,199,0.85)',
+};
+const PALETTE = Object.values(C);
 
-    <!-- ══ 섹션 A : 정기 전송 ══ -->
-    <div class="section-title-bar">
-        <div class="section-tag tag-green">정기 전송</div>
-    </div>
-    <div class="kpi-grid four-col mb16">
-        <div class="kpi-card accent-green">
-            <div class="kpi-icon"><i class="fas fa-layer-group"></i></div>
-            <div class="kpi-body">
-                <div class="kpi-value" id="v_bw_total">-</div>
-                <div class="kpi-label">올해 총 발송 회차</div>
-            </div>
-        </div>
-        <div class="kpi-card accent-teal">
-            <div class="kpi-icon"><i class="fas fa-file-medical"></i></div>
-            <div class="kpi-body">
-                <div class="kpi-value" id="v_bw_sogyeon">-</div>
-                <div class="kpi-label">사후관리 소견서 발송</div>
-                <div class="kpi-sub">누적</div>
-            </div>
-        </div>
-        <div class="kpi-card accent-yellow">
-            <div class="kpi-icon"><i class="fas fa-brain"></i></div>
-            <div class="kpi-body">
-                <div class="kpi-value" id="v_bw_noesim">-</div>
-                <div class="kpi-label">뇌심·직무 발송</div>
-                <div class="kpi-sub">누적</div>
-            </div>
-        </div>
-        <div class="kpi-card accent-purple">
-            <div class="kpi-icon"><i class="fas fa-calendar-week"></i></div>
-            <div class="kpi-body">
-                <div class="kpi-value" id="v_bw_month">-</div>
-                <div class="kpi-label" id="v_bw_month_label">최근 발송일</div>
-            </div>
-        </div>
-    </div>
-    <div class="charts-grid mb24">
-        <div class="chart-card wide">
-            <div class="chart-header">
-                <h3><i class="fas fa-chart-bar"></i> 월별 정기 사후관리 발송 현황</h3>
-            </div>
-            <div style="height:240px"><canvas id="v_bwMonthlyChart"></canvas></div>
-        </div>
-    </div>
+// ── 전역 상태 ─────────────────────────────────────────
+const state = {
+    knx:  { raw:[], filtered:[], page:1, search:'' },
+    req:  { raw:[], filtered:[], page:1, search:'' },
+    bw:   { records:[], filtered:[] },
+    etc:  { biman:[], swi:[], ombu:[] },
+    visFilters: { year:'all', jy:'all' },
+};
+const CH = {};
+let deleteTargetId = null;
+let deleteTargetTable = null;
 
+// ── DOM Ready ──────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+    Chart.defaults.color = '#64748B';
+    Chart.defaults.font.family = "'Noto Sans KR', sans-serif";
+    Chart.defaults.font.size = 11;
+    initClock();
+    initTabs();
+    initVisFilters();
+    initBiweeklyForm();
+    initSearches();
+    initEtcForms();
+    loadExternalData();   // window.KNX_DATA / window.REQ_DATA 로드
+    loadBiweeklyData();
+    loadEtcData();
+});
 
+/* =====================================================
+   공통 유틸
+   ===================================================== */
+function initClock() {
+    const el = document.getElementById('currentTime');
+    const tick = () => { el.textContent = new Date().toLocaleString('ko-KR',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}); };
+    tick(); setInterval(tick, 1000);
+}
 
-    <!-- ══ 섹션 B : KNX 발송 ══ -->
-    <div class="section-title-bar">
-        <div class="section-tag tag-blue">KNX 발송</div>
-        <span class="sheet-status" id="knxSheetStatus">미로드</span>
-    </div>
-    
-    <!-- 통합 필터 -->
-    <div class="filter-bar">
-        <div class="filter-group">
-            <label><i class="fas fa-calendar-alt"></i> 연도</label>
-            <div class="filter-buttons" id="visYearFilter">
-                <button class="filter-btn active" data-year="all">전체</button>
-            </div>
-        </div>
-        <div class="filter-group">
-            <label><i class="fas fa-stethoscope"></i> 예/종건</label>
-            <div class="filter-buttons" id="visJyFilter">
-                <button class="filter-btn active" data-jy="all">전체</button>
-                <button class="filter-btn" data-jy="예건">예건</button>
-                <button class="filter-btn" data-jy="종건">종건</button>
-            </div>
-        </div>
-    </div>
-    
-    
-    <div class="kpi-grid four-col mb16">
-        <div class="kpi-card accent-blue">
-            <div class="kpi-icon"><i class="fas fa-paper-plane"></i></div>
-            <div class="kpi-body">
-                <div class="kpi-value" id="v_knx_total">-</div>
-                <div class="kpi-label">올해 총 전송</div>
-            </div>
-        </div>
-        <div class="kpi-card accent-green">
-            <div class="kpi-icon"><i class="fas fa-calendar-check"></i></div>
-            <div class="kpi-body">
-                <div class="kpi-value" id="v_knx_month">-</div>
-                <div class="kpi-label">이번 달</div>
-            </div>
-        </div>
-        <div class="kpi-card accent-teal">
-            <div class="kpi-icon"><i class="fas fa-building"></i></div>
-            <div class="kpi-body">
-                <div class="kpi-value" id="v_knx_clients">-</div>
-                <div class="kpi-label">거래처 수</div>
-            </div>
-        </div>
-        <div class="kpi-card accent-red">
-            <div class="kpi-icon"><i class="fas fa-database"></i></div>
-            <div class="kpi-body">
-                <div class="kpi-value" id="v_knx_items">-</div>
-                <div class="kpi-label">항목 합계</div>
-            </div>
-        </div>
-    </div>
-    <div class="charts-grid three-col mb8">
-        <div class="chart-card wide-2">
-            <div class="chart-header">
-                <h3><i class="fas fa-chart-bar"></i> KNX 월별 전송 건수</h3>
-            </div>
-            <div style="height:240px"><canvas id="v_knxMonthlyChart"></canvas></div>
-        </div>
-        <div class="chart-card">
-            <div class="chart-header">
-                <h3><i class="fas fa-layer-group"></i> 거래처별 Top 10</h3>
-            </div>
-            <div style="height:240px"><canvas id="v_knxGroupChart"></canvas></div>
-        </div>
-    </div>
-    <div class="charts-grid mb24">
-        <div class="chart-card">
-            <div class="chart-header">
-                <h3><i class="fas fa-boxes"></i> 항목별 건수</h3>
-            </div>
-            <div style="height:260px"><canvas id="v_knxItemChart"></canvas></div>
-        </div>
-        <div class="chart-card">
-            <div class="chart-header">
-                <h3><i class="fas fa-file-alt"></i> 요청 자료 Top 10 <span class="chart-sub">(비고 기준)</span></h3>
-            </div>
-            <div style="height:260px"><canvas id="v_knxMemoChart"></canvas></div>
-        </div>
-    </div>
+function showToast(msg, type='success') {
+    let t = document.getElementById('__toast');
+    if (!t) { t=document.createElement('div'); t.id='__toast'; t.className='toast'; document.body.appendChild(t); }
+    t.className=`toast ${type}`;
+    t.innerHTML=`<i class="fas fa-${type==='success'?'check-circle':'exclamation-circle'}"></i> ${msg}`;
+    t.classList.add('show');
+    clearTimeout(t._t); t._t = setTimeout(()=>t.classList.remove('show'), 3000);
+}
 
-    <!-- ══ 섹션 C : 자료요청 회신 ══ -->
-    <div class="section-title-bar">
-        <div class="section-tag tag-orange">자료요청 회신</div>
-        <span class="sheet-status" id="reqSheetStatus">미로드</span>
-    </div>
-    <div class="kpi-grid four-col mb16">
-        <div class="kpi-card accent-orange">
-            <div class="kpi-icon"><i class="fas fa-inbox"></i></div>
-            <div class="kpi-body">
-                <div class="kpi-value" id="v_req_total">-</div>
-                <div class="kpi-label">올해 총 회신</div>
-            </div>
-        </div>
-        <div class="kpi-card accent-green">
-            <div class="kpi-icon"><i class="fas fa-calendar-check"></i></div>
-            <div class="kpi-body">
-                <div class="kpi-value" id="v_req_month">-</div>
-                <div class="kpi-label">이번 달 회신</div>
-            </div>
-        </div>
-        <div class="kpi-card accent-blue">
-            <div class="kpi-icon"><i class="fas fa-building"></i></div>
-            <div class="kpi-body">
-                <div class="kpi-value" id="v_req_clients">-</div>
-                <div class="kpi-label">거래처 수</div>
-            </div>
-        </div>
-        <div class="kpi-card accent-purple">
-            <div class="kpi-icon"><i class="fas fa-database"></i></div>
-            <div class="kpi-body">
-                <div class="kpi-value" id="v_req_items">-</div>
-                <div class="kpi-label">항목 합계</div>
-            </div>
-        </div>
-    </div>
-    <div class="charts-grid three-col mb8">
-        <div class="chart-card wide-2">
-            <div class="chart-header">
-                <h3><i class="fas fa-chart-bar"></i> 자료요청 월별 회신 건수</h3>
-            </div>
-            <div style="height:240px"><canvas id="v_reqMonthlyChart"></canvas></div>
-        </div>
-        <div class="chart-card">
-            <div class="chart-header">
-                <h3><i class="fas fa-layer-group"></i> 거래처별 Top 10</h3>
-            </div>
-            <div style="height:240px"><canvas id="v_reqGroupChart"></canvas></div>
-        </div>
-    </div>
-    <div class="charts-grid mb24">
-        <div class="chart-card">
-            <div class="chart-header">
-                <h3><i class="fas fa-boxes"></i> 항목별 건수</h3>
-            </div>
-            <div style="height:260px"><canvas id="v_reqItemChart"></canvas></div>
-        </div>
-        <div class="chart-card">
-            <div class="chart-header">
-                <h3><i class="fas fa-file-alt"></i> 요청 자료 Top 10 <span class="chart-sub">(비고 기준)</span></h3>
-            </div>
-            <div style="height:260px"><canvas id="v_reqMemoChart"></canvas></div>
-        </div>
-    </div>
+const pad = n => String(n).padStart(2,'0');
+function setEl(id, val) { const e=document.getElementById(id); if(e) e.textContent=val; }
+function toggleActive(container, btn) {
+    container.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+}
 
-    <!-- ══ 섹션 D : 종합 비교 ══ -->
-    <div class="section-title-bar">
-        <div class="section-tag tag-purple">종합 비교</div>
-    </div>
-    <div class="charts-grid mb24">
-        <div class="chart-card wide">
-            <div class="chart-header">
-                <h3><i class="fas fa-chart-line"></i> 월별 통합 건수 추이</h3>
-                <div class="chart-legend">
-                    <span class="legend-item"><span class="dot green"></span>정기 발송</span>
-                    <span class="legend-item"><span class="dot blue"></span>KNX</span>
-                    <span class="legend-item"><span class="dot orange"></span>자료요청</span>
-                </div>
-            </div>
-            <div style="height:280px"><canvas id="v_combinedChart"></canvas></div>
-        </div>
-    </div>
+// ── 예/종건 → {ye, jong} 각 카운트 (종예건 = 예건1+종건1) ──
+function parseJY(val) {
+    const v = String(val||'').trim();
+    const hasYe  = v.includes('예건') || v==='예';
+    const hasJong = v.includes('종건') || v==='종';
+    if (hasYe && hasJong) return { ye:1, jong:1, label:'종예건' };
+    if (hasYe)            return { ye:1, jong:0, label:'예건' };
+    if (hasJong)          return { ye:0, jong:1, label:'종건' };
+    return { ye:0, jong:0, label:v||'기타' };
+}
 
-</div>
-</main>
+function jongYeBadge(val) {
+    if (!val) return '<span class="badge b-etc">-</span>';
+    const jy = parseJY(val);
+    if (jy.ye && jy.jong) return `<span class="badge b-both">${val}</span>`;
+    if (jy.ye)            return `<span class="badge b-ye">${val}</span>`;
+    if (jy.jong)          return `<span class="badge b-jong">${val}</span>`;
+    return `<span class="badge b-etc">${val}</span>`;
+}
+function provBadge(v){return v==='정기'?`<span class="badge b-reg">정기</span>`:v?`<span class="badge b-etc">${v}</span>`:'<span class="badge b-etc">-</span>';}
+function ck(v){return v?'<i class="fas fa-check ck"></i>':'<i class="fas fa-minus uck"></i>';}
 
-<!-- ============================================================
-     TAB 2 : 데이터 입력
-     ============================================================ -->
-<main class="tab-content" id="tab-upload">
-<div class="page-container">
-    <div class="upload-page-grid">
+function destroyChart(key) { if(CH[key]){ CH[key].destroy(); delete CH[key]; } }
 
-        <!-- 좌: 정기 발송 입력 -->
-        <section class="upload-section-card">
-            <div class="upload-section-header green">
-                <i class="fas fa-calendar-week"></i>
-                <div>
-                    <strong>2주 정기 발송 입력</strong>
-                    <span>이메일 대신 여기에 기록하세요</span>
-                </div>
-            </div>
-            <div class="mini-kpi-row">
-                <div class="mini-kpi"><span class="mini-val" id="up_bw_total">-</span><span class="mini-label">올해 총 회차</span></div>
-                <div class="mini-kpi"><span class="mini-val green" id="up_bw_sogyeon">-</span><span class="mini-label">사후관리 소견서</span></div>
-                <div class="mini-kpi"><span class="mini-val yellow" id="up_bw_noesim">-</span><span class="mini-label">뇌심·직무</span></div>
-                <div class="mini-kpi"><span class="mini-val blue" id="up_bw_month">-</span><span class="mini-label">이번 달</span></div>
-            </div>
-            <form class="report-form" id="biweeklyForm">
-                <div class="form-group">
-                    <label><i class="fas fa-tag"></i> 발송 항목 구분 <span class="required">*</span></label>
-                    <div class="radio-group">
-                        <label class="radio-label">
-                            <input type="radio" name="report_type" value="사후관리 소견서" checked>
-                            <span class="radio-custom"></span><span>사후관리 소견서</span>
-                        </label>
-                        <label class="radio-label">
-                            <input type="radio" name="report_type" value="뇌심·직무">
-                            <span class="radio-custom"></span><span>뇌심·직무</span>
-                        </label>
-                    </div>
-                </div>
-                <div class="form-group">
-                    <label><i class="fas fa-calendar-alt"></i> 대상 기간 <span class="required">*</span></label>
-                    <div class="date-range-row">
-                        <input type="date" id="periodStart" class="form-input" required>
-                        <span class="date-sep">~</span>
-                        <input type="date" id="periodEnd" class="form-input" required>
-                    </div>
-                    <div class="period-quick">
-                        <button type="button" class="quick-btn" data-period="first">이번달 1~15일</button>
-                        <button type="button" class="quick-btn" data-period="second">이번달 16~말일</button>
-                        <button type="button" class="quick-btn" data-period="prev-first">저번달 1~15일</button>
-                        <button type="button" class="quick-btn" data-period="prev-second">저번달 16~말일</button>
-                    </div>
-                </div>
-                <div class="form-group">
-                    <label><i class="fas fa-calendar-check"></i> 발송일 <span class="required">*</span></label>
-                    <input type="date" id="sendDate" class="form-input" required>
-                </div>
-                <div class="form-group">
-                    <label><i class="fas fa-building"></i> 대상 사업장 수 <span class="required">*</span></label>
-                    <div class="count-row">
-                        <div class="count-box">
-                            <span class="count-label">종건</span>
-                            <div class="count-input-wrap">
-                                <button type="button" class="count-btn minus" data-target="jongCount">−</button>
-                                <input type="number" id="jongCount" class="count-input" value="0" min="0">
-                                <button type="button" class="count-btn plus" data-target="jongCount">+</button>
-                            </div>
-                            <span class="count-unit">개소</span>
-                        </div>
-                        <div class="count-box">
-                            <span class="count-label">예건</span>
-                            <div class="count-input-wrap">
-                                <button type="button" class="count-btn minus" data-target="yeCount">−</button>
-                                <input type="number" id="yeCount" class="count-input" value="0" min="0">
-                                <button type="button" class="count-btn plus" data-target="yeCount">+</button>
-                            </div>
-                            <span class="count-unit">개소</span>
-                        </div>
-                    </div>
-                    <div class="count-total">합계: <strong id="totalCount">0</strong> 개소</div>
-                </div>
-                <div class="form-group">
-                    <label><i class="fas fa-sticky-note"></i> 메모 (선택)</label>
-                    <textarea id="reportNote" class="form-textarea" placeholder="특이사항 등" rows="2"></textarea>
-                </div>
-                <div class="form-actions">
-                    <button type="button" class="btn-secondary" id="clearFormBtn"><i class="fas fa-undo"></i> 초기화</button>
-                    <button type="submit" class="btn-primary" id="saveReportBtn"><i class="fas fa-save"></i> 저장</button>
-                </div>
-            </form>
-            <div class="bw-list-header">
-                <h4><i class="fas fa-list-alt"></i> 발송 보고 목록</h4>
-                <div class="filter-buttons" id="upBwYearFilter"><button class="filter-btn active" data-year="all">전체</button></div>
-                <span class="row-count" id="bwRowCount">0건</span>
-            </div>
-            <div class="table-wrapper">
-                <table>
-                    <thead>
-                        <tr><th>발송일</th><th>항목</th><th>대상 기간</th><th>종건</th><th>예건</th><th>합계</th><th>메모</th><th></th></tr>
-                    </thead>
-                    <tbody id="biweeklyTableBody">
-                        <tr><td colspan="8"><div class="empty-state sm"><i class="fas fa-plus-circle"></i><p>폼으로 입력해 주세요</p></div></td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </section>
+/** canvas 요소가 없으면 null 반환, 있으면 Chart 인스턴스 반환 */
+function safeChart(canvasId, config) {
+    const el = document.getElementById(canvasId);
+    if(!el) { console.warn('[safeChart] canvas 없음:', canvasId); return null; }
+    // NaN/undefined/Infinity 값 정제
+    if(config?.data?.datasets) {
+        config.data.datasets = config.data.datasets.map(ds=>({
+            ...ds,
+            data: (ds.data||[]).map(v=>(typeof v==='number'&&isFinite(v))?v:0)
+        }));
+    }
+    return new Chart(el, config);
+}
 
-        <!-- 우: 데이터 현황 -->
-        <section class="upload-section-card">
-            <div class="upload-section-header blue">
-                <i class="fas fa-database"></i>
-                <div>
-                    <strong>KNX / 자료요청 데이터 현황</strong>
-                    <span>convert.exe 실행 후 data/ 폴더를 NAS에 복사하세요</span>
-                </div>
-            </div>
+function barOpts(stacked=false, indexAxis='x') {
+    return { responsive:true, maintainAspectRatio:false, indexAxis,
+        plugins:{
+            legend:{position:'bottom',labels:{color:'#475569',padding:10,boxWidth:10}},
+            tooltip:{backgroundColor:'#1E293B',titleColor:'#F1F5F9',bodyColor:'#CBD5E1',borderColor:'#334155',borderWidth:1,padding:10}
+        },
+        scales:{
+            x:{stacked, grid:{color:'rgba(0,0,0,.05)'}, ticks:{color:'#64748B'}},
+            y:{stacked, grid:{color:'rgba(0,0,0,.06)'}, ticks:{color:'#64748B'}}
+        }
+    };
+}
+function pieOpts() {
+    return { responsive:true, maintainAspectRatio:false, cutout:'55%',
+        plugins:{
+            legend:{position:'bottom',labels:{color:'#475569',padding:8,boxWidth:10}},
+            tooltip:{backgroundColor:'#1E293B',titleColor:'#F1F5F9',bodyColor:'#CBD5E1',borderColor:'#334155',borderWidth:1}
+        }
+    };
+}
+function lineOpts() {
+    return { responsive:true, maintainAspectRatio:false,
+        plugins:{
+            legend:{position:'bottom',labels:{color:'#475569',padding:10,boxWidth:10}},
+            tooltip:{backgroundColor:'#1E293B',titleColor:'#F1F5F9',bodyColor:'#CBD5E1',borderColor:'#334155',borderWidth:1,padding:10}
+        },
+        scales:{
+            x:{grid:{color:'rgba(0,0,0,.05)'},ticks:{color:'#64748B',maxTicksLimit:16}},
+            y:{grid:{color:'rgba(0,0,0,.06)'},ticks:{color:'#64748B'}}
+        }
+    };
+}
 
-            <!-- 로드 상태 카드 -->
-            <div class="sheet-result-row">
-                <div class="sheet-result-card" id="sheetResult1">
-                    <div class="sheet-result-icon blue"><i class="fas fa-paper-plane"></i></div>
-                    <div class="sheet-result-body">
-                        <div class="sheet-result-name">KNX 발송</div>
-                        <div class="sheet-result-count" id="sheet1Count">-</div>
-                        <div class="sheet-result-status" id="sheet1Status">확인 중</div>
-                    </div>
-                </div>
-                <div class="sheet-result-card" id="sheetResult2">
-                    <div class="sheet-result-icon orange"><i class="fas fa-inbox"></i></div>
-                    <div class="sheet-result-body">
-                        <div class="sheet-result-name">자료요청서</div>
-                        <div class="sheet-result-count" id="sheet2Count">-</div>
-                        <div class="sheet-result-status" id="sheet2Status">확인 중</div>
-                    </div>
-                </div>
-            </div>
+/* =====================================================
+   탭 전환
+   ===================================================== */
+function initTabs() {
+    document.querySelectorAll('.tab-btn').forEach(btn=>{
+        btn.addEventListener('click',()=>{
+            document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
+            btn.classList.add('active');
+            document.getElementById(btn.dataset.tab).classList.add('active');
+        });
+    });
+}
 
-            <!-- 사용 안내 -->
-            <div class="upload-guide">
-                <div class="guide-title"><i class="fas fa-terminal"></i> 데이터 갱신 방법</div>
-                <ol class="guide-steps">
-                    <li><i class="fas fa-file-excel" style="color:#1d6f42"></i> <strong>업무현황.xlsx</strong> 편집 후 저장</li>
-                    <li><i class="fas fa-cog" style="color:var(--blue)"></i> <strong>convert.exe</strong> 더블클릭 실행</li>
-                    <li><i class="fas fa-copy" style="color:var(--teal)"></i> <strong>data/</strong> 폴더를 NAS에 덮어쓰기 복사</li>
-                    <li><i class="fas fa-sync" style="color:var(--green)"></i> 브라우저에서 <kbd>F5</kbd> 새로고침</li>
-                </ol>
-            </div>
+/* =====================================================
+   시각화 탭 필터
+   ===================================================== */
+function initVisFilters() {
+    document.getElementById('visYearFilter').addEventListener('click', e=>{
+        const btn=e.target.closest('.filter-btn'); if(!btn) return;
+        state.visFilters.year = btn.dataset.year==='all' ? 'all' : parseInt(btn.dataset.year);
+        toggleActive(document.getElementById('visYearFilter'), btn);
+        applyVisFilters();
+    });
+    document.getElementById('visJyFilter').addEventListener('click', e=>{
+        const btn=e.target.closest('.filter-btn'); if(!btn) return;
+        state.visFilters.jy = btn.dataset.jy;
+        toggleActive(document.getElementById('visJyFilter'), btn);
+        applyVisFilters();
+    });
+}
 
-            <!-- KNX 테이블 -->
-            <div class="mini-table-section">
-                <div class="table-header">
-                    <h4><i class="fas fa-paper-plane" style="color:var(--blue)"></i> KNX 발송 상세</h4>
-                    <div class="table-controls">
-                        <input type="text" id="knxSearch" placeholder="검색..." class="search-input sm">
-                        <span class="row-count" id="knxRowCount">0건</span>
-                    </div>
-                </div>
-                <div class="table-wrapper">
-                    <table id="knxTable">
-                        <thead>
-                            <tr>
-                                <th>발송일자</th><th>예/종건</th><th>사업장명</th><th>거래처구분</th>
-                                <th>세로</th><th>가로</th><th>뇌심</th><th>직무</th><th>정신</th><th>동의자</th><th>사업장양식</th><th>사이트</th><th>통계</th>
-                                <th>합계</th><th>제공형태</th><th>발송인</th><th>비고</th>
-                            </tr>
-                        </thead>
-                        <tbody id="knxTableBody">
-                            <tr><td colspan="17"><div class="empty-state sm"><i class="fas fa-cog"></i><p>convert.exe 실행 후 data/ 복사 → F5</p></div></td></tr>
-                        </tbody>
-                    </table>
-                </div>
-                <div class="table-footer"><div class="pagination" id="knxPagination"></div></div>
-            </div>
+function updateVisYearFilterButtons() {
+    const years = new Set([
+        ...state.knx.raw.map(r=>r.y),
+        ...state.req.raw.map(r=>r.y),
+        ...state.bw.records.map(r=>parseInt(r.send_date?.substring(0,4))||0)
+    ].filter(y=>y>2000));
+    const sorted = [...years].sort();
+    const container = document.getElementById('visYearFilter');
+    container.innerHTML='<button class="filter-btn" data-year="all">전체</button>';
+    sorted.forEach(y=>{
+        const b=document.createElement('button'); b.className='filter-btn'; b.dataset.year=y; b.textContent=y+'년'; container.appendChild(b);
+    });
+    const curY=new Date().getFullYear();
+    // 데이터에 현재 연도가 있으면 자동 선택 (최초 1회만)
+    if(sorted.includes(curY) && state.visFilters.year==='all') state.visFilters.year=curY;
+    // 선택된 연도 버튼 하이라이트
+    container.querySelectorAll('.filter-btn').forEach(b=>{
+        const isAll = b.dataset.year==='all' && state.visFilters.year==='all';
+        const isYear = String(b.dataset.year)===String(state.visFilters.year);
+        b.classList.toggle('active', isAll || isYear);
+    });
+}
 
-            <!-- 자료요청 테이블 -->
-            <div class="mini-table-section">
-                <div class="table-header">
-                    <h4><i class="fas fa-inbox" style="color:var(--orange)"></i> 자료요청서 회신 상세</h4>
-                    <div class="table-controls">
-                        <input type="text" id="reqSearch" placeholder="검색..." class="search-input sm">
-                        <span class="row-count" id="reqRowCount">0건</span>
-                    </div>
-                </div>
-                <div class="table-wrapper">
-                    <table id="reqTable">
-                        <thead>
-                            <tr>
-                                <th>발송일자</th><th>예/종건</th><th>사업장명</th><th>거래처구분</th>
-                                <th>세로</th><th>가로</th><th>뇌심</th><th>직무</th><th>정신</th><th>동의자</th><th>사업장양식</th><th>사이트</th><th>통계</th>
-                                <th>합계</th><th>발송인</th><th>비고</th>
-                            </tr>
-                        </thead>
-                        <tbody id="reqTableBody">
-                            <tr><td colspan="16"><div class="empty-state sm"><i class="fas fa-cog"></i><p>convert.exe 실행 후 data/ 복사 → F5</p></div></td></tr>
-                        </tbody>
-                    </table>
-                </div>
-                <div class="table-footer"><div class="pagination" id="reqPagination"></div></div>
-            </div>
-        </section>
-    </div>
-</div>
-</main>
+// ── 예/종건 필터 적용 로직 (종예건은 both=예건+종건이므로 '예건'/'종건' 모두에 포함) ──
+function matchJY(jyLabel, filter) {
+    if (filter==='all') return true;
+    const jy = parseJY(jyLabel);
+    if (filter==='예건') return jy.ye > 0;
+    if (filter==='종건') return jy.jong > 0;
+    return true;
+}
 
-<!-- ============================================================
-     TAB 3 : 기타 업무 (비만·SWI·옴부즈만)
-     ============================================================ -->
-<main class="tab-content" id="tab-etc">
-<div class="page-container">
+function applyVisFilters() {
+    const {year, jy} = state.visFilters;
+    state.knx.filtered = state.knx.raw.filter(r=>{
+        if (year!=='all' && r.y!==year) return false;
+        if (!matchJY(r.jongYe, jy)) return false;
+        return true;
+    });
+    state.req.filtered = state.req.raw.filter(r=>{
+        if (year!=='all' && r.y!==year) return false;
+        if (!matchJY(r.jongYe, jy)) return false;
+        return true;
+    });
+    state.bw.filtered = state.bw.records.filter(r=>{
+        if (year!=='all' && r.send_date?.substring(0,4)!==String(year)) return false;
+        return true;
+    });
+    renderVisAll();
+}
 
-    <!-- 상단 요약 KPI -->
-    <div class="kpi-grid three-col mb16">
-        <div class="kpi-card accent-blue">
-            <div class="kpi-icon"><i class="fas fa-weight"></i></div>
-            <div class="kpi-body">
-                <div class="kpi-value" id="etc_kpi_biman">-</div>
-                <div class="kpi-label">비만 관리 (올해)</div>
-            </div>
-        </div>
-        <div class="kpi-card accent-green">
-            <div class="kpi-icon"><i class="fas fa-heartbeat"></i></div>
-            <div class="kpi-body">
-                <div class="kpi-value" id="etc_kpi_swi">-</div>
-                <div class="kpi-label">SWI (올해)</div>
-            </div>
-        </div>
-        <div class="kpi-card accent-purple">
-            <div class="kpi-icon"><i class="fas fa-comments"></i></div>
-            <div class="kpi-body">
-                <div class="kpi-value" id="etc_kpi_ombu">-</div>
-                <div class="kpi-label">옴부즈만 (올해)</div>
-            </div>
-        </div>
-    </div>
+/* =====================================================
+   시각화 탭 렌더링
+   ===================================================== */
+function renderVisAll() {
+    renderVisBwKPI(); renderVisBwCharts();
+    renderVisKnxKPI(); renderVisKnxCharts();
+    renderVisReqKPI(); renderVisReqCharts();
+    renderVisCombinedChart();
+    updateDataStatus();
+}
 
-    <div class="etc-grid">
+// A. 정기 발송
+function renderVisBwKPI() {
+    const now = new Date();
+    const curY = now.getFullYear(), curM = now.getMonth()+1, curD = now.getDate();
+    const all  = state.bw.records.filter(r=>r.send_date?.startsWith(String(curY)));
+    setEl('v_bw_total',   all.length);
+    setEl('v_bw_sogyeon', all.reduce((sum,r)=> sum + Number(r.jong_count||0)+ Number(r.ye_count||0),0));
+    setEl('v_bw_noesim',  all.filter(r=>r.report_type==='뇌심·직무').reduce((sum,r)=>sum+Number(r.jong_count||0)+Number(r.ye_count||0),0));
+    const latest = state.bw.records.length ? state.bw.records[0].send_date : '-';
+    setEl('v_bw_month', latest);
+}
+function renderVisBwCharts() {
+    const data=state.bw.filtered;
+    const months=Array.from({length:12},(_,i)=>`${i+1}월`);
+    const ye = Array (12).fill(0);
+    const jong = Array (23).fill(0);
+    data.forEach(r=>{ const m=parseInt(r.send_date?.substring(5,7)||'')-1; if(!isNaN(m)&&m>=0&&m<12){ jong[m] += Number(r.jong_count || 0); ye[m] += Number(r.ye_count || 0); } });
+    destroyChart('v_bwMonthly');
+    CH.v_bwMonthly = safeChart('v_bwMonthlyChart',{
+        type:'bar',
+        data:{labels:months,datasets:[{label:'종건',data:jong,backgroundColor:C.green,borderRadius:4},{label:'예건',data:ye,backgroundColor:C.yellow,borderRadius:4}]},
+        options:barOpts(true)
+    });
+}
 
-        <!-- ── 비만 ── -->
-        <div class="etc-card">
-            <div class="etc-card-header biman">
-                <i class="fas fa-weight"></i>
-                <div><strong>비만 관리</strong><span>건수 직접 입력</span></div>
-                <div class="etc-kpi-inline">
-                    <span id="etc_biman_total_inline">0건</span>
-                </div>
-            </div>
-            <form class="etc-form" id="bimanForm" data-type="biman">
-                <div class="etc-form-row">
-                    <div class="form-group">
-                        <label><i class="fas fa-calendar"></i> 날짜 <span class="required">*</span></label>
-                        <input type="date" class="form-input" name="date" required>
-                    </div>
-                    <div class="form-group">
-                        <label><i class="fas fa-building"></i> 사업장명</label>
-                        <input type="text" class="form-input" name="workplace" placeholder="사업장명">
-                    </div>
-                    <div class="form-group">
-                        <label><i class="fas fa-stethoscope"></i> 예/종건</label>
-                        <select class="form-input" name="jongye">
-                            <option value="">-</option>
-                            <option value="예건">예건</option>
-                            <option value="종건">종건</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label><i class="fas fa-hashtag"></i> 건수 <span class="required">*</span></label>
-                        <input type="number" class="form-input" name="count" value="1" min="1" required>
-                    </div>
-                    <div class="form-group full-row">
-                        <label><i class="fas fa-sticky-note"></i> 메모</label>
-                        <input type="text" class="form-input" name="note" placeholder="메모">
-                    </div>
-                </div>
-                <button type="submit" class="btn-primary sm-btn"><i class="fas fa-plus"></i> 추가</button>
-            </form>
-            <div class="etc-table-wrap">
-                <div class="etc-table-header">
-                    <span class="row-count" id="bimanRowCount">0건</span>
-                </div>
-                <div class="table-wrapper">
-                    <table><thead>
-                        <tr><th>날짜</th><th>사업장</th><th>예/종건</th><th>건수</th><th>메모</th><th></th></tr>
-                    </thead>
-                    <tbody id="bimanTableBody">
-                        <tr><td colspan="6"><div class="empty-state sm"><i class="fas fa-plus-circle"></i><p>입력해 주세요</p></div></td></tr>
-                    </tbody></table>
-                </div>
-            </div>
-            <div class="etc-chart-wrap">
-                <div class="chart-header"><h3><i class="fas fa-chart-bar"></i> 월별 추이</h3></div>
-                <div style="height:180px"><canvas id="bimanChart"></canvas></div>
-            </div>
-        </div>
+// B. KNX — 예/종건 카운트 시 종예건은 ye+jong 각 1씩
+function renderVisKnxKPI() {
+    const curY=new Date().getFullYear(), curM=new Date().getMonth()+1;
+    const all  = state.knx.raw.filter(r=>r.y===curY);
+    const filt = state.knx.filtered;
+    const month= filt.filter(r=>r.y===curY&&r.m===curM);
+    const clients = new Set(filt.map(r=>(r.workplace||r.group||'').trim()).filter(Boolean));
+    const items   = filt.reduce((s,r)=>s+r.itemSum,0);
+    setEl('v_knx_total',   all.length.toLocaleString());
+    setEl('v_knx_month',   month.length.toLocaleString());
+    setEl('v_knx_clients', clients.size.toLocaleString());
+    setEl('v_knx_items',   items.toLocaleString());
+    setEl('knxSheetStatus', all.length>0 ? `✓ ${all.length}건` : '미로드');
+}
+function renderVisKnxCharts() {
+    const data = state.knx.filtered;
+    const months = Array.from({length:12},(_,i)=>`${i+1}월`);
+    // 예건/종건 각각 카운트 (종예건 = 각 1씩)
+    const yeC=Array(12).fill(0), jC=Array(12).fill(0);
+    data.forEach(r=>{ const m=r.m-1; if(m<0||m>11||isNaN(m)) return; const jy=parseJY(r.jongYe); yeC[m]+=jy.ye; jC[m]+=jy.jong; });
+    destroyChart('v_knxMonthly');
+    CH.v_knxMonthly = safeChart('v_knxMonthlyChart',{
+        type:'bar',
+        data:{labels:months,datasets:[{label:'예건',data:yeC,backgroundColor:C.blue,borderRadius:4},{label:'종건',data:jC,backgroundColor:C.green,borderRadius:4}]},
+        options:barOpts(true)
+    });
 
-        <!-- ── SWI ── -->
-        <div class="etc-card">
-            <div class="etc-card-header swi">
-                <i class="fas fa-heartbeat"></i>
-                <div><strong>SWI</strong><span>건수 직접 입력</span></div>
-                <div class="etc-kpi-inline">
-                    <span id="etc_swi_total_inline">0건</span>
-                </div>
-            </div>
-            <form class="etc-form" id="swiForm" data-type="swi">
-                <div class="etc-form-row">
-                    <div class="form-group">
-                        <label><i class="fas fa-calendar"></i> 날짜 <span class="required">*</span></label>
-                        <input type="date" class="form-input" name="date" required>
-                    </div>
-                    <div class="form-group">
-                        <label><i class="fas fa-building"></i> 사업장명</label>
-                        <input type="text" class="form-input" name="workplace" placeholder="사업장명">
-                    </div>
-                    <div class="form-group">
-                        <label><i class="fas fa-stethoscope"></i> 예/종건</label>
-                        <select class="form-input" name="jongye">
-                            <option value="">-</option>
-                            <option value="예건">예건</option>
-                            <option value="종건">종건</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label><i class="fas fa-hashtag"></i> 건수 <span class="required">*</span></label>
-                        <input type="number" class="form-input" name="count" value="1" min="1" required>
-                    </div>
-                    <div class="form-group full-row">
-                        <label><i class="fas fa-sticky-note"></i> 메모</label>
-                        <input type="text" class="form-input" name="note" placeholder="메모">
-                    </div>
-                </div>
-                <button type="submit" class="btn-primary sm-btn"><i class="fas fa-plus"></i> 추가</button>
-            </form>
-            <div class="etc-table-wrap">
-                <div class="etc-table-header">
-                    <span class="row-count" id="swiRowCount">0건</span>
-                </div>
-                <div class="table-wrapper">
-                    <table><thead>
-                        <tr><th>날짜</th><th>사업장</th><th>예/종건</th><th>건수</th><th>메모</th><th></th></tr>
-                    </thead>
-                    <tbody id="swiTableBody">
-                        <tr><td colspan="6"><div class="empty-state sm"><i class="fas fa-plus-circle"></i><p>입력해 주세요</p></div></td></tr>
-                    </tbody></table>
-                </div>
-            </div>
-            <div class="etc-chart-wrap">
-                <div class="chart-header"><h3><i class="fas fa-chart-bar"></i> 월별 추이</h3></div>
-                <div style="height:180px"><canvas id="swiChart"></canvas></div>
-            </div>
-        </div>
+    // 거래처별 Top10 (사업장명 기준)
+    const gMap={};
+    data.forEach(r=>{ const g=r.workplace||r.group||'미지정'; gMap[g]=(gMap[g]||0)+1; });
+    const sorted=Object.entries(gMap).sort((a,b)=>b[1]-a[1]).slice(0,10);
+    destroyChart('v_knxGroup');
+    CH.v_knxGroup = safeChart('v_knxGroupChart',{
+        type:'bar',
+        data:{labels:sorted.map(e=>e[0]),datasets:[{label:'건수',data:sorted.map(e=>e[1]),backgroundColor:C.purple,borderRadius:4}]},
+        options:{...barOpts(false,'y'),plugins:{...barOpts().plugins,legend:{display:false}}}
+    });
 
-        <!-- ── 옴부즈만 ── -->
-        <div class="etc-card">
-            <div class="etc-card-header ombu">
-                <i class="fas fa-comments"></i>
-                <div><strong>옴부즈만</strong><span>건수 직접 입력</span></div>
-                <div class="etc-kpi-inline">
-                    <span id="etc_ombu_total_inline">0건</span>
-                </div>
-            </div>
-            <form class="etc-form" id="ombuForm" data-type="ombu">
-                <div class="etc-form-row">
-                    <div class="form-group">
-                        <label><i class="fas fa-calendar"></i> 날짜 <span class="required">*</span></label>
-                        <input type="date" class="form-input" name="date" required>
-                    </div>
-                    <div class="form-group">
-                        <label><i class="fas fa-building"></i> 사업장명</label>
-                        <input type="text" class="form-input" name="workplace" placeholder="사업장명">
-                    </div>
-                    <div class="form-group">
-                        <label><i class="fas fa-stethoscope"></i> 예/종건</label>
-                        <select class="form-input" name="jongye">
-                            <option value="">-</option>
-                            <option value="예건">예건</option>
-                            <option value="종건">종건</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label><i class="fas fa-hashtag"></i> 건수 <span class="required">*</span></label>
-                        <input type="number" class="form-input" name="count" value="1" min="1" required>
-                    </div>
-                    <div class="form-group full-row">
-                        <label><i class="fas fa-sticky-note"></i> 메모</label>
-                        <input type="text" class="form-input" name="note" placeholder="메모">
-                    </div>
-                </div>
-                <button type="submit" class="btn-primary sm-btn"><i class="fas fa-plus"></i> 추가</button>
-            </form>
-            <div class="etc-table-wrap">
-                <div class="etc-table-header">
-                    <span class="row-count" id="ombuRowCount">0건</span>
-                </div>
-                <div class="table-wrapper">
-                    <table><thead>
-                        <tr><th>날짜</th><th>사업장</th><th>예/종건</th><th>건수</th><th>메모</th><th></th></tr>
-                    </thead>
-                    <tbody id="ombuTableBody">
-                        <tr><td colspan="6"><div class="empty-state sm"><i class="fas fa-plus-circle"></i><p>입력해 주세요</p></div></td></tr>
-                    </tbody></table>
-                </div>
-            </div>
-            <div class="etc-chart-wrap">
-                <div class="chart-header"><h3><i class="fas fa-chart-bar"></i> 월별 추이</h3></div>
-                <div style="height:180px"><canvas id="ombuChart"></canvas></div>
-            </div>
-        </div>
+    // 항목별
+    const itemT=ITEM_LABELS.map((_,i)=>data.reduce((s,r)=>{
+        if(!Array.isArray(r.items)||r.items.length<=i) return s;
+        return s+(r.items[i]||0);
+    },0));
+    destroyChart('v_knxItem');
+    CH.v_knxItem = safeChart('v_knxItemChart',{
+        type:'bar',
+        data:{labels:ITEM_LABELS,datasets:[{label:'건수',data:itemT,backgroundColor:PALETTE,borderRadius:4}]},
+        options:{...barOpts(),plugins:{...barOpts().plugins,legend:{display:false}}}
+    });
 
-    </div><!-- /etc-grid -->
-</div>
-</main>
+    // 요청 자료 Top10 (KNX 비고 기준)
+    renderMemoTop10Chart(data, 'v_knxMemoChart', 'v_knxMemo', C.teal);
+}
 
-<!-- ===== 삭제 확인 모달 ===== -->
-<div class="modal-overlay" id="deleteModal" style="display:none">
-    <div class="modal small">
-        <div class="modal-header">
-            <h3><i class="fas fa-trash-alt" style="color:var(--red)"></i> 삭제 확인</h3>
-        </div>
-        <div class="modal-body"><p>이 항목을 삭제하시겠습니까?</p></div>
-        <div class="modal-footer">
-            <button class="btn-secondary" id="cancelDelete">취소</button>
-            <button class="btn-danger" id="confirmDelete">삭제</button>
-        </div>
-    </div>
-</div>
+// C. 자료요청
+function renderVisReqKPI() {
+    const curY=new Date().getFullYear(), curM=new Date().getMonth()+1;
+    const all  = state.req.raw.filter(r=>r.y===curY);
+    const filt = state.req.filtered;
+    const month= filt.filter(r=>r.y===curY&&r.m===curM);
+    const clients=new Set(filt.map(r=>(r.workplace||r.group||'').trim()).filter(Boolean));
+    const items  =filt.reduce((s,r)=>s+r.itemSum,0);
+    setEl('v_req_total',   all.length.toLocaleString());
+    setEl('v_req_month',   month.length.toLocaleString());
+    setEl('v_req_clients', clients.size.toLocaleString());
+    setEl('v_req_items',   items.toLocaleString());
+    setEl('reqSheetStatus', all.length>0 ? `✓ ${all.length}건` : '미로드');
+}
+function renderVisReqCharts() {
+    const data=state.req.filtered;
+    const months=Array.from({length:12},(_,i)=>`${i+1}월`);
+    const mC=Array(12).fill(0);
+    data.forEach(r=>{ const mi=r.m-1; if(mi>=0&&mi<12&&!isNaN(mi)) mC[mi]++; });
+    destroyChart('v_reqMonthly');
+    CH.v_reqMonthly = safeChart('v_reqMonthlyChart',{
+        type:'bar',
+        data:{labels:months,datasets:[{label:'회신 건수',data:mC,backgroundColor:C.orange,borderRadius:4}]},
+        options:{...barOpts(),plugins:{...barOpts().plugins,legend:{display:false}}}
+    });
 
-<script src="js/main.js"></script>
-</body>
-</html>
+    const gMap={};
+    data.forEach(r=>{ const g=r.workplace||r.group||'미지정'; gMap[g]=(gMap[g]||0)+1; });
+    const sorted=Object.entries(gMap).sort((a,b)=>b[1]-a[1]).slice(0,10);
+    destroyChart('v_reqGroup');
+    CH.v_reqGroup = safeChart('v_reqGroupChart',{
+        type:'bar',
+        data:{labels:sorted.map(e=>e[0]),datasets:[{label:'건수',data:sorted.map(e=>e[1]),backgroundColor:C.blue,borderRadius:4}]},
+        options:{...barOpts(false,'y'),plugins:{...barOpts().plugins,legend:{display:false}}}
+    });
 
+    const itemT=ITEM_LABELS.map((_,i)=>data.reduce((s,r)=>{
+        if(!Array.isArray(r.items)||r.items.length<=i) return s;
+        return s+(r.items[i]||0);
+    },0));
+    destroyChart('v_reqItem');
+    CH.v_reqItem = safeChart('v_reqItemChart',{
+        type:'bar',
+        data:{labels:ITEM_LABELS,datasets:[{label:'건수',data:itemT,backgroundColor:PALETTE,borderRadius:4}]},
+        options:{...barOpts(),plugins:{...barOpts().plugins,legend:{display:false}}}
+    });
 
+    // 요청 자료 Top10 (자료요청서 비고 기준)
+    renderMemoTop10Chart(data, 'v_reqMemoChart', 'v_reqMemo', C.orange);
+}
+
+/* =====================================================
+   공통: 비고 기반 요청 자료 Top10 차트
+   비고 필드(memo/note)를 쉼표·슬래시·공백으로 split →
+   빈도순 정렬 후 상위 10개 수평 막대 차트
+   ===================================================== */
+function parseMemoTokens(str) {
+    if(!str || typeof str !== 'string') return [];
+    // 쉼표, 슬래시, ·, &, +, 공백(2개 이상) 기준 split, 앞뒤 공백 제거
+    return str.split(/[,\/·&+]|  +/)
+        .map(t=>t.trim())
+        .filter(t=>t.length >= 2);   // 1자 이하 토큰 제외
+}
+
+function renderMemoTop10Chart(data, canvasId, chartKey, color) {
+    // 비고: KNX는 r.memo, 요청서는 r.note 사용 (둘 다 fallback)
+    const freq = {};
+    data.forEach(r=>{
+        const raw = r.memo || r.note || '';
+        parseMemoTokens(raw).forEach(token=>{
+            const k = token;
+            freq[k] = (freq[k]||0) + 1;
+        });
+    });
+    const sorted = Object.entries(freq).sort((a,b)=>b[1]-a[1]).slice(0,10);
+    destroyChart(chartKey);
+    if(!sorted.length) {
+        CH[chartKey] = safeChart(canvasId, {
+            type:'bar',
+            data:{labels:['비고 데이터 없음'],datasets:[{label:'건수',data:[0],backgroundColor:'rgba(100,116,139,.15)',borderRadius:4}]},
+            options:{...barOpts(false,'y'),plugins:{...barOpts().plugins,legend:{display:false}}}
+        });
+        return;
+    }
+    CH[chartKey] = safeChart(canvasId, {
+        type: 'bar',
+        data: {
+            labels: sorted.map(e=>e[0]),
+            datasets: [{
+                label: '건수',
+                data:   sorted.map(e=>e[1]),
+                backgroundColor: color,
+                borderRadius: 4,
+            }]
+        },
+        options: {
+            ...barOpts(false,'y'),
+            plugins: { ...barOpts().plugins, legend:{display:false} }
+        }
+    });
+}
+
+// D. 종합 비교
+function renderVisCombinedChart() {
+    const ymBw  = state.bw.filtered.map(r=>{const y=r.send_date?.substring(0,4),m=r.send_date?.substring(5,7);return y&&m?`${y}-${m}`:null;}).filter(Boolean);
+    const ymKnx = state.knx.filtered.map(r=>`${r.y}-${pad(r.m)}`);
+    const ymReq = state.req.filtered.map(r=>`${r.y}-${pad(r.m)}`);
+    const ymSet = [...new Set([...ymBw,...ymKnx,...ymReq])].sort();
+    const bwD  =ymSet.map(ym=>state.bw.filtered.filter(r=>{const[y,m]=ym.split('-');return r.send_date?.startsWith(y+'-'+m);}).length);
+    const knxD =ymSet.map(ym=>{const[y,m]=ym.split('-').map(Number);return state.knx.filtered.filter(r=>r.y===y&&r.m===m).length;});
+    const reqD =ymSet.map(ym=>{const[y,m]=ym.split('-').map(Number);return state.req.filtered.filter(r=>r.y===y&&r.m===m).length;});
+    destroyChart('v_combined');
+    CH.v_combined = safeChart('v_combinedChart',{
+        type:'line',
+        data:{labels:ymSet,datasets:[
+            {label:'정기 발송',data:bwD, borderColor:C.green, backgroundColor:'rgba(22,163,74,.10)',  fill:true,tension:.4,pointRadius:4,pointBackgroundColor:C.green},
+            {label:'KNX 발송', data:knxD,borderColor:C.blue,  backgroundColor:'rgba(30,115,230,.10)', fill:true,tension:.4,pointRadius:4,pointBackgroundColor:C.blue},
+            {label:'자료요청', data:reqD,borderColor:C.orange,backgroundColor:'rgba(234,88,12,.10)',  fill:true,tension:.4,pointRadius:4,pointBackgroundColor:C.orange},
+        ]},
+        options:lineOpts()
+    });
+}
+
+function updateDataStatus() {
+    const knxOk=state.knx.raw.length>0, reqOk=state.req.raw.length>0;
+    const dot=document.querySelector('.status-dot'), text=document.getElementById('dataStatus');
+    if (knxOk&&reqOk) {
+        dot.className='status-dot loaded';
+        text.innerHTML=`<span class="status-dot loaded"></span> KNX ${state.knx.raw.length}건 · 요청서 ${state.req.raw.length}건`;
+    } else if (knxOk||reqOk) {
+        dot.className='status-dot partial';
+        text.innerHTML=`<span class="status-dot partial"></span> 일부 로드됨`;
+    }
+}
+
+/* =====================================================
+   외부 데이터 로드 (data/knx.js, data/req.js)
+   convert.exe 실행 후 생성된 전역변수 사용
+   ===================================================== */
+function loadExternalData() {
+    // ── KNX 데이터 ──────────────────────────────────────
+    const knxRaw = window.KNX_DATA || [];
+    state.knx.raw = knxRaw.filter(r => {
+        // 방어: y/m 유효성 확인
+        return r && r.date && r.y >= 2020 && r.y <= 2050
+            && r.m >= 1 && r.m <= 12
+            && Array.isArray(r.items) && r.items.length === 9;
+    });
+    // itemSum 재계산 (누락 방어)
+    state.knx.raw.forEach(r => {
+        r.itemSum = r.items.reduce((s, v) => s + (v || 0), 0);
+    });
+
+    const knxOk = state.knx.raw.length > 0;
+    setEl('sheet1Count',  state.knx.raw.length + '건');
+    setEl('sheet1Status', knxOk ? '로드 완료 ✓' : 'data/knx.js 없음');
+    const s1 = document.getElementById('sheetResult1');
+    if(s1) s1.classList.toggle('loaded', knxOk);
+
+    // ── REQ 데이터 ──────────────────────────────────────
+    const reqRaw = window.REQ_DATA || [];
+    state.req.raw = reqRaw.filter(r => {
+        return r && r.date && r.y >= 2020 && r.y <= 2050
+            && r.m >= 1 && r.m <= 12
+            && Array.isArray(r.items) && r.items.length === 9;
+    });
+    state.req.raw.forEach(r => {
+        r.itemSum = r.items.reduce((s, v) => s + (v || 0), 0);
+    });
+
+    const reqOk = state.req.raw.length > 0;
+    setEl('sheet2Count',  state.req.raw.length + '건');
+    setEl('sheet2Status', reqOk ? '로드 완료 ✓' : 'data/req.js 없음');
+    const s2 = document.getElementById('sheetResult2');
+    if(s2) s2.classList.toggle('loaded', reqOk);
+
+    console.log(`[DATA] KNX ${state.knx.raw.length}건, REQ ${state.req.raw.length}건 로드`);
+
+    updateVisYearFilterButtons();
+    applyVisFilters();
+    renderUploadKnxTable();
+    renderUploadReqTable();
+}
+
+/* =====================================================
+   데이터 입력 탭 — 업로드 테이블
+   ===================================================== */
+function initSearches() {
+    document.getElementById('knxSearch').addEventListener('input', e=>{ state.knx.search=e.target.value.toLowerCase(); state.knx.page=1; renderUploadKnxTable(); });
+    document.getElementById('reqSearch').addEventListener('input', e=>{ state.req.search=e.target.value.toLowerCase(); state.req.page=1; renderUploadReqTable(); });
+}
+
+function renderUploadKnxTable() {
+    let data=[...state.knx.raw].sort((a,b)=>b.date.localeCompare(a.date));
+    if(state.knx.search){const q=state.knx.search; data=data.filter(r=>r.date.includes(q)||(r.workplace||'').toLowerCase().includes(q)||(r.group||'').toLowerCase().includes(q)||(r.staff||'').toLowerCase().includes(q)||(r.memo||'').toLowerCase().includes(q));}
+    setEl('knxRowCount', data.length.toLocaleString()+'건');
+    const total=Math.ceil(data.length/PAGE)||1;
+    const page=data.slice((state.knx.page-1)*PAGE, state.knx.page*PAGE);
+    const tbody=document.getElementById('knxTableBody');
+    if(!page.length){ tbody.innerHTML=`<tr><td colspan="17"><div class="empty-state sm"><i class="fas fa-file-upload"></i><p>엑셀을 업로드해 주세요</p></div></td></tr>`; }
+    else {
+        tbody.innerHTML=page.map(r=>`<tr>
+            <td style="font-family:var(--mono);color:var(--blue)">${r.date}</td>
+            <td>${jongYeBadge(r.jongYe)}</td>
+            <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis" title="${r.workplace}">${r.workplace||'-'}</td>
+            <td>${r.group||'-'}</td>
+            ${r.items.map(v=>ck(v)).map(s=>`<td style="text-align:center">${s}</td>`).join('')}
+            <td style="font-family:var(--mono);text-align:center;color:var(--teal)">${r.itemSum}</td>
+            <td>${provBadge(r.provType)}</td>
+            <td style="color:var(--purple)">${r.staff||'-'}</td>
+            <td style="color:var(--sub);max-width:120px;overflow:hidden;text-overflow:ellipsis" title="${r.memo}">${r.memo||'-'}</td>
+        </tr>`).join('');
+    }
+    renderPagination('knxPagination', total, state.knx.page, p=>{ state.knx.page=p; renderUploadKnxTable(); });
+}
+
+function renderUploadReqTable() {
+    let data=[...state.req.raw].sort((a,b)=>b.date.localeCompare(a.date));
+    if(state.req.search){const q=state.req.search; data=data.filter(r=>r.date.includes(q)||(r.workplace||'').toLowerCase().includes(q)||(r.group||'').toLowerCase().includes(q)||(r.sender||'').toLowerCase().includes(q)||(r.note||'').toLowerCase().includes(q));}
+    setEl('reqRowCount', data.length.toLocaleString()+'건');
+    const total=Math.ceil(data.length/PAGE)||1;
+    const page=data.slice((state.req.page-1)*PAGE, state.req.page*PAGE);
+    const tbody=document.getElementById('reqTableBody');
+    if(!page.length){ tbody.innerHTML=`<tr><td colspan="16"><div class="empty-state sm"><i class="fas fa-file-upload"></i><p>엑셀을 업로드해 주세요</p></div></td></tr>`; }
+    else {
+        tbody.innerHTML=page.map(r=>`<tr>
+            <td style="font-family:var(--mono);color:var(--blue)">${r.date}</td>
+            <td>${jongYeBadge(r.jongYe)}</td>
+            <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis" title="${r.workplace}">${r.workplace||'-'}</td>
+            <td>${r.group||'-'}</td>
+            ${r.items.map(v=>ck(v)).map(s=>`<td style="text-align:center">${s}</td>`).join('')}
+            <td style="font-family:var(--mono);text-align:center;color:var(--teal)">${r.itemSum}</td>
+            <td style="color:var(--purple)">${r.sender||'-'}</td>
+            <td style="color:var(--sub);max-width:120px;overflow:hidden;text-overflow:ellipsis" title="${r.note}">${r.note||'-'}</td>
+        </tr>`).join('');
+    }
+    renderPagination('reqPagination', total, state.req.page, p=>{ state.req.page=p; renderUploadReqTable(); });
+}
+
+/* =====================================================
+   데이터 입력 탭 — 정기 발송 폼
+   ===================================================== */
+function initBiweeklyForm() {
+    document.querySelectorAll('.quick-btn').forEach(btn=>btn.addEventListener('click',()=>setQuickPeriod(btn.dataset.period)));
+    document.querySelectorAll('.count-btn').forEach(btn=>{
+        btn.addEventListener('click',()=>{
+            const id=btn.dataset.target; const input=document.getElementById(id);
+            let v=parseInt(input.value)||0;
+            if(btn.classList.contains('plus')) v=Math.max(0,v+1);
+            if(btn.classList.contains('minus')) v=Math.max(0,v-1);
+            input.value=v; updateCountTotal();
+        });
+    });
+    document.getElementById('jongCount').addEventListener('input', updateCountTotal);
+    document.getElementById('yeCount').addEventListener('input', updateCountTotal);
+    document.getElementById('biweeklyForm').addEventListener('submit', e=>{ e.preventDefault(); saveBiweekly(); });
+    document.getElementById('clearFormBtn').addEventListener('click', clearBwForm);
+    document.getElementById('upBwYearFilter').addEventListener('click', e=>{
+        const btn=e.target.closest('.filter-btn'); if(!btn) return;
+        toggleActive(document.getElementById('upBwYearFilter'), btn);
+        renderBwTable(btn.dataset.year==='all'?'all':parseInt(btn.dataset.year));
+    });
+    // 삭제 모달
+    document.getElementById('cancelDelete').addEventListener('click',()=>document.getElementById('deleteModal').style.display='none');
+    document.getElementById('confirmDelete').addEventListener('click', ()=>{
+        if(!deleteTargetId) return;
+        lsDelete(deleteTargetTable, deleteTargetId);
+        document.getElementById('deleteModal').style.display='none';
+        showToast('삭제되었습니다.');
+        if(deleteTargetTable===API_BW) loadBiweeklyData();
+        else loadEtcData();
+    });
+    document.getElementById('sendDate').value=new Date().toISOString().split('T')[0];
+}
+
+function setQuickPeriod(period) {
+    const now=new Date(),y=now.getFullYear(),m=now.getMonth();
+    let s,e;
+    if(period==='first')         {s=new Date(y,m,2);   e=new Date(y,m,16);}
+    else if(period==='second')   {s=new Date(y,m,17);  e=new Date(y,m+1,1);}
+    else if(period==='prev-first'){s=new Date(y,m-1,2); e=new Date(y,m-1,16);}
+    else                          {s=new Date(y,m-1,17);e=new Date(y,m,1);}
+    document.getElementById('periodStart').value=s.toISOString().split('T')[0];
+    document.getElementById('periodEnd').value  =e.toISOString().split('T')[0];
+}
+function updateCountTotal() {
+    const j=parseInt(document.getElementById('jongCount').value)||0;
+    const y=parseInt(document.getElementById('yeCount').value)||0;
+    setEl('totalCount',(j+y).toLocaleString());
+}
+function clearBwForm() {
+    document.querySelectorAll('input[name=report_type]')[0].checked=true;
+    document.getElementById('periodStart').value='';
+    document.getElementById('periodEnd').value='';
+    document.getElementById('sendDate').value=new Date().toISOString().split('T')[0];
+    document.getElementById('jongCount').value='0';
+    document.getElementById('yeCount').value='0';
+    document.getElementById('reportNote').value='';
+    updateCountTotal();
+}
+function saveBiweekly() {
+    const rtype    = document.querySelector('input[name=report_type]:checked').value;
+    const pStart   = document.getElementById('periodStart').value;
+    const pEnd     = document.getElementById('periodEnd').value;
+    const sendDate = document.getElementById('sendDate').value;
+    const jongCount= parseInt(document.getElementById('jongCount').value)||0;
+    const yeCount  = parseInt(document.getElementById('yeCount').value)||0;
+    const note     = document.getElementById('reportNote').value.trim();
+    if(!pStart||!pEnd||!sendDate){showToast('대상기간과 발송일을 입력해 주세요.','error');return;}
+    const record = {
+        id: lsUUID(),
+        report_type: rtype,
+        period_start: pStart, period_end: pEnd,
+        send_date: sendDate,
+        jong_count: jongCount, ye_count: yeCount,
+        note,
+        created_at: Date.now()
+    };
+    lsSave(API_BW, record);
+    showToast('저장되었습니다.');
+    clearBwForm();
+    loadBiweeklyData();
+}
+function loadBiweeklyData() {
+    state.bw.records = lsLoad(API_BW).sort((a,b)=>(b.send_date||'').localeCompare(a.send_date||''));
+    const years=[...new Set(state.bw.records.map(r=>r.send_date?.substring(0,4)).filter(Boolean))].sort();
+    const yf=document.getElementById('upBwYearFilter');
+    const curAct=yf.querySelector('.filter-btn.active')?.dataset.year||'all';
+    yf.innerHTML='<button class="filter-btn" data-year="all">전체</button>';
+    years.forEach(y=>{const b=document.createElement('button');b.className='filter-btn';b.dataset.year=y;b.textContent=y+'년';yf.appendChild(b);});
+    yf.querySelectorAll('.filter-btn').forEach(b=>b.classList.toggle('active',b.dataset.year===String(curAct)));
+    const curY=String(new Date().getFullYear()), curM=new Date().getMonth()+1;
+    const all=state.bw.records.filter(r=>r.send_date?.startsWith(curY));
+    setEl('up_bw_total',   all.length);
+    setEl('up_bw_sogyeon', all.filter(r=>r.report_type==='사후관리 소견서').length);
+    setEl('up_bw_noesim',  all.filter(r=>r.report_type==='뇌심·직무').length);
+    setEl('up_bw_month',   state.bw.records.filter(r=>r.send_date?.startsWith(curY+'-'+pad(curM))).length);
+    updateVisYearFilterButtons();
+    applyVisFilters();
+    renderBwTable('all');
+}
+function renderBwTable(yearFilter='all') {
+    let data=state.bw.records.filter(r=>yearFilter==='all'||r.send_date?.startsWith(String(yearFilter)));
+    setEl('bwRowCount',data.length+'건');
+    const tbody=document.getElementById('biweeklyTableBody');
+    if(!data.length){tbody.innerHTML=`<tr><td colspan="8"><div class="empty-state sm"><i class="fas fa-plus-circle"></i><p>폼으로 입력해 주세요</p></div></td></tr>`;return;}
+    tbody.innerHTML=data.map(r=>{
+        const total=(r.jong_count||0)+(r.ye_count||0);
+        const badge=r.report_type==='사후관리 소견서'?'<span class="badge b-sogyeon">사후관리 소견서</span>':'<span class="badge b-noesim">뇌심·직무</span>';
+        const period=r.period_start&&r.period_end?`${r.period_start.substring(5)} ~ ${r.period_end.substring(5)}`:'-';
+        return `<tr>
+            <td style="font-family:var(--mono);color:var(--blue)">${r.send_date||'-'}</td>
+            <td>${badge}</td><td>${period}</td>
+            <td style="font-family:var(--mono);text-align:center;color:var(--green)">${r.jong_count||0}</td>
+            <td style="font-family:var(--mono);text-align:center;color:var(--blue)">${r.ye_count||0}</td>
+            <td style="font-family:var(--mono);text-align:center;color:var(--teal);font-weight:700">${total}</td>
+            <td style="color:var(--sub);max-width:120px;overflow:hidden;text-overflow:ellipsis" title="${r.note||''}">${r.note||'-'}</td>
+            <td><button class="act-btn act-delete" data-id="${r.id}" data-table="${API_BW}"><i class="fas fa-trash"></i></button></td>
+        </tr>`;
+    }).join('');
+    tbody.querySelectorAll('.act-delete').forEach(btn=>btn.addEventListener('click',()=>{
+        deleteTargetId=btn.dataset.id; deleteTargetTable=btn.dataset.table;
+        document.getElementById('deleteModal').style.display='flex';
+    }));
+}
+
+/* =====================================================
+   기타 업무 탭 (비만 / SWI / 옴부즈만)
+   ===================================================== */
+const ETC_CONFIG = {
+    biman: { label:'비만 관리', color:C.blue,   chartColor:'rgba(0,217,255,0.7)' },
+    swi:   { label:'SWI',       color:C.green,  chartColor:'rgba(0,255,163,0.7)' },
+    ombu:  { label:'옴부즈만',  color:C.purple, chartColor:'rgba(167,139,250,0.7)' },
+};
+
+function initEtcForms() {
+    const today = new Date().toISOString().split('T')[0];
+    ['biman','swi','ombu'].forEach(type=>{
+        const form = document.getElementById(`${type}Form`);
+        // 날짜 초기값 = 오늘
+        const dateInput = form.querySelector('[name=date]');
+        if(dateInput) dateInput.value = today;
+        form.addEventListener('submit', e=>{
+            e.preventDefault();
+            saveEtcRecord(type, e.target);
+        });
+    });
+}
+
+function saveEtcRecord(type, form) {
+    const date      = form.querySelector('[name=date]').value;
+    const workplace = form.querySelector('[name=workplace]').value.trim();
+    const jongye    = form.querySelector('[name=jongye]').value;
+    const count     = parseInt(form.querySelector('[name=count]').value)||1;
+    const note      = form.querySelector('[name=note]').value.trim();
+    if(!date){showToast('날짜를 입력해 주세요.','error');return;}
+    const record = { id:lsUUID(), work_type:type, date, workplace, jongye, count, note, created_at:Date.now() };
+    lsSave(API_ETC, record);
+    showToast('추가되었습니다.');
+    form.querySelector('[name=date]').value=new Date().toISOString().split('T')[0];
+    form.querySelector('[name=workplace]').value='';
+    form.querySelector('[name=jongye]').value='';
+    form.querySelector('[name=count]').value='1';
+    form.querySelector('[name=note]').value='';
+    loadEtcData();
+}
+
+function loadEtcData() {
+    const all = lsLoad(API_ETC).sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+    state.etc.biman = all.filter(r=>r.work_type==='biman');
+    state.etc.swi   = all.filter(r=>r.work_type==='swi');
+    state.etc.ombu  = all.filter(r=>r.work_type==='ombu');
+    renderEtcAll();
+}
+
+function renderEtcAll() {
+    const curY=String(new Date().getFullYear());
+    ['biman','swi','ombu'].forEach(type=>{
+        const data=state.etc[type];
+        const yearData=data.filter(r=>r.date?.startsWith(curY));
+        const totalCount=yearData.reduce((s,r)=>s+(r.count||0),0);
+        // 상단 KPI
+        setEl(`etc_kpi_${type}`, totalCount+'건');
+        setEl(`etc_${type}_total_inline`, totalCount+'건');
+        setEl(`${type}RowCount`, data.length+'건');
+        renderEtcTable(type, data);
+        renderEtcChart(type, data, curY);
+    });
+}
+
+function renderEtcTable(type, data) {
+    const tbody=document.getElementById(`${type}TableBody`);
+    if(!data.length){tbody.innerHTML=`<tr><td colspan="6"><div class="empty-state sm"><i class="fas fa-plus-circle"></i><p>입력해 주세요</p></div></td></tr>`;return;}
+    tbody.innerHTML=data.slice(0,30).map(r=>`<tr>
+        <td style="font-family:var(--mono);color:var(--blue)">${r.date||'-'}</td>
+        <td style="max-width:100px;overflow:hidden;text-overflow:ellipsis">${r.workplace||'-'}</td>
+        <td>${r.jongye?jongYeBadge(r.jongye):'<span class="badge b-etc">-</span>'}</td>
+        <td style="font-family:var(--mono);text-align:center;color:var(--teal);font-weight:700">${r.count||1}</td>
+        <td style="color:var(--sub);max-width:100px;overflow:hidden;text-overflow:ellipsis" title="${r.note||''}">${r.note||'-'}</td>
+        <td><button class="act-btn act-delete" data-id="${r.id}" data-table="${API_ETC}"><i class="fas fa-trash"></i></button></td>
+    </tr>`).join('');
+    tbody.querySelectorAll('.act-delete').forEach(btn=>btn.addEventListener('click',()=>{
+        deleteTargetId=btn.dataset.id; deleteTargetTable=btn.dataset.table;
+        document.getElementById('deleteModal').style.display='flex';
+    }));
+}
+
+function renderEtcChart(type, data, curY) {
+    const months=Array.from({length:12},(_,i)=>`${i+1}월`);
+    const mC=Array(12).fill(0);
+    data.filter(r=>r.date?.startsWith(curY)).forEach(r=>{
+        const m=parseInt(r.date?.substring(5,7)||'')-1;
+        if(!isNaN(m)&&m>=0&&m<12) mC[m]+=(r.count||1);
+    });
+    const cfg=ETC_CONFIG[type];
+    destroyChart(`etc_${type}`);
+    CH[`etc_${type}`]=safeChart(`${type}Chart`,{
+        type:'bar',
+        data:{labels:months,datasets:[{label:cfg.label,data:mC,backgroundColor:cfg.chartColor,borderRadius:4}]},
+        options:{...barOpts(),plugins:{...barOpts().plugins,legend:{display:false}}}
+    });
+}
+
+/* =====================================================
+   공통 페이지네이션
+   ===================================================== */
+function renderPagination(cid, total, current, onPage) {
+    const c=document.getElementById(cid);
+    if(total<=1){c.innerHTML='';return;}
+    const s=Math.max(1,current-3), e=Math.min(total,current+3);
+    let h='';
+    if(current>1) h+=`<button class="page-btn" data-p="${current-1}">‹</button>`;
+    for(let p=s;p<=e;p++) h+=`<button class="page-btn${p===current?' active':''}" data-p="${p}">${p}</button>`;
+    if(current<total) h+=`<button class="page-btn" data-p="${current+1}">›</button>`;
+    c.innerHTML=h;
+    c.querySelectorAll('.page-btn').forEach(btn=>btn.addEventListener('click',()=>onPage(parseInt(btn.dataset.p))));
+}
