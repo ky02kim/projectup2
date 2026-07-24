@@ -101,7 +101,7 @@
 
     <!-- ══ 섹션 B : KNX 발송 ══ -->
     <div class="section-title-bar">
-        <div class="section-tag tag-blue">Knox 발송</div>
+        <div class="section-tag tag-blue">KNX 발송</div>
         <span class="sheet-status" id="knxSheetStatus">미로드</span>
     </div>
     
@@ -157,7 +157,7 @@
     <div class="charts-grid three-col mb8">
         <div class="chart-card wide-2">
             <div class="chart-header">
-                <h3><i class="fas fa-chart-bar"></i> Knox 월별 전송 건수</h3>
+                <h3><i class="fas fa-chart-bar"></i> KNX 월별 전송 건수</h3>
             </div>
             <div style="height:240px"><canvas id="v_knxMonthlyChart"></canvas></div>
         </div>
@@ -256,6 +256,7 @@
             <div class="chart-header">
                 <h3><i class="fas fa-chart-line"></i> 월별 통합 건수 추이</h3>
                 <div class="chart-legend">
+                    <span class="legend-item"><span class="dot green"></span>정기 발송</span>
                     <span class="legend-item"><span class="dot blue"></span>KNX</span>
                     <span class="legend-item"><span class="dot orange"></span>자료요청</span>
                 </div>
@@ -274,51 +275,102 @@
 <div class="page-container">
     <div class="upload-page-grid">
 
-        <!-- 좌: 사후관리 집계  -->
+        <!-- 좌: 정기 발송 입력 -->
         <section class="upload-section-card">
-    <div class="upload-section-header green">
-        <i class="fas fa-calendar-week"></i>
-        <div>
-            <strong>사후관리 집계 (HGC)</strong>
-            <span>convert.exe 실행 후 자동 반영됩니다</span>
-        </div>
-    </div>
-
-    <!-- 요약 KPI -->
-    <div class="mini-kpi-row">
-        <div class="mini-kpi"><span class="mini-val" id="hgcTotalCount">-</span><span class="mini-label">총 건수</span></div>
-        <div class="mini-kpi"><span class="mini-val badge-yellow" id="hgcTargetCount">-</span><span class="mini-label">발송대상</span></div>
-        <div class="mini-kpi"><span class="mini-val badge-green" id="hgcCompleteCount">-</span><span class="mini-label">발송완료</span></div>
-        <div class="mini-kpi"><span class="mini-val" id="hgcPeriodCount">-</span><span class="mini-label">기간 그룹</span></div>
-    </div>
-
-    <!-- 연도 필터 -->
-    <div class="bw-list-header">
-        <h4><i class="fas fa-list-alt"></i> 사후관리 집계 목록</h4>
-        <select id="bwYearSelect" class="year-select"></select>
-        <span class="row-count" id="bwRowCount">0건</span>
-    </div>
-
-    <!-- HGC 테이블 -->
-    <div class="table-wrapper">
-        <table id="hgcTable">
-            <thead>
-                <tr>
-                    <th>상태</th>
-                    <th>파일일자</th>
-                    <th>종/예건</th>
-                    <th>건진기간</th>
-                    <th>거래처명</th>
-                    <th style="text-align:center">접수건수</th>
-                    <th>노동부보고</th>
-                </tr>
-            </thead>
-            <tbody id="hgcTableBody">
-                <!-- JS에서 채워짐 -->
-            </tbody>
-        </table>
-    </div>
-</section>
+            <div class="upload-section-header green">
+                <i class="fas fa-calendar-week"></i>
+                <div>
+                    <strong>2주 정기 발송 입력</strong>
+                    <span>이메일 대신 여기에 기록하세요</span>
+                </div>
+            </div>
+            <div class="mini-kpi-row">
+                <div class="mini-kpi"><span class="mini-val" id="up_bw_total">-</span><span class="mini-label">올해 총 회차</span></div>
+                <div class="mini-kpi"><span class="mini-val green" id="up_bw_sogyeon">-</span><span class="mini-label">사후관리 소견서</span></div>
+                <div class="mini-kpi"><span class="mini-val yellow" id="up_bw_noesim">-</span><span class="mini-label">뇌심·직무</span></div>
+                <div class="mini-kpi"><span class="mini-val blue" id="up_bw_month">-</span><span class="mini-label">이번 달</span></div>
+            </div>
+            <form class="report-form" id="biweeklyForm">
+                <div class="form-group">
+                    <label><i class="fas fa-tag"></i> 발송 항목 구분 <span class="required">*</span></label>
+                    <div class="radio-group">
+                        <label class="radio-label">
+                            <input type="radio" name="report_type" value="사후관리 소견서" checked>
+                            <span class="radio-custom"></span><span>사후관리 소견서</span>
+                        </label>
+                        <label class="radio-label">
+                            <input type="radio" name="report_type" value="뇌심·직무">
+                            <span class="radio-custom"></span><span>뇌심·직무</span>
+                        </label>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label><i class="fas fa-calendar-alt"></i> 대상 기간 <span class="required">*</span></label>
+                    <div class="date-range-row">
+                        <input type="date" id="periodStart" class="form-input" required>
+                        <span class="date-sep">~</span>
+                        <input type="date" id="periodEnd" class="form-input" required>
+                    </div>
+                    <div class="period-quick">
+                        <button type="button" class="quick-btn" data-period="first">이번달 1~15일</button>
+                        <button type="button" class="quick-btn" data-period="second">이번달 16~말일</button>
+                        <button type="button" class="quick-btn" data-period="prev-first">저번달 1~15일</button>
+                        <button type="button" class="quick-btn" data-period="prev-second">저번달 16~말일</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label><i class="fas fa-calendar-check"></i> 발송일 <span class="required">*</span></label>
+                    <input type="date" id="sendDate" class="form-input" required>
+                </div>
+                <div class="form-group">
+                    <label><i class="fas fa-building"></i> 대상 사업장 수 <span class="required">*</span></label>
+                    <div class="count-row">
+                        <div class="count-box">
+                            <span class="count-label">종건</span>
+                            <div class="count-input-wrap">
+                                <button type="button" class="count-btn minus" data-target="jongCount">−</button>
+                                <input type="number" id="jongCount" class="count-input" value="0" min="0">
+                                <button type="button" class="count-btn plus" data-target="jongCount">+</button>
+                            </div>
+                            <span class="count-unit">개소</span>
+                        </div>
+                        <div class="count-box">
+                            <span class="count-label">예건</span>
+                            <div class="count-input-wrap">
+                                <button type="button" class="count-btn minus" data-target="yeCount">−</button>
+                                <input type="number" id="yeCount" class="count-input" value="0" min="0">
+                                <button type="button" class="count-btn plus" data-target="yeCount">+</button>
+                            </div>
+                            <span class="count-unit">개소</span>
+                        </div>
+                    </div>
+                    <div class="count-total">합계: <strong id="totalCount">0</strong> 개소</div>
+                </div>
+                <div class="form-group">
+                    <label><i class="fas fa-sticky-note"></i> 메모 (선택)</label>
+                    <textarea id="reportNote" class="form-textarea" placeholder="특이사항 등" rows="2"></textarea>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn-secondary" id="clearFormBtn"><i class="fas fa-undo"></i> 초기화</button>
+                    <button type="submit" class="btn-primary" id="saveReportBtn"><i class="fas fa-save"></i> 저장</button>
+                </div>
+            </form>
+            <div class="bw-list-header">
+                <h4><i class="fas fa-list-alt"></i> 발송 보고 목록</h4>
+                <div class="filter-buttons" id="upBwYearFilter"><button class="filter-btn active" data-year="all">전체</button></div>
+                <span class="row-count" id="bwRowCount">0건</span>
+            </div>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr><th>발송일</th><th>항목</th><th>대상 기간</th><th>종건</th><th>예건</th><th>합계</th><th>메모</th><th></th></tr>
+                    </thead>
+                    <tbody id="biweeklyTableBody">
+                        <tr><td colspan="8"><div class="empty-state sm"><i class="fas fa-plus-circle"></i><p>폼으로 입력해 주세요</p></div></td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
 
         <!-- 우: 데이터 현황 -->
         <section class="upload-section-card">
@@ -335,7 +387,7 @@
                 <div class="sheet-result-card" id="sheetResult1">
                     <div class="sheet-result-icon blue"><i class="fas fa-paper-plane"></i></div>
                     <div class="sheet-result-body">
-                        <div class="sheet-result-name">Knox 발송</div>
+                        <div class="sheet-result-name">KNX 발송</div>
                         <div class="sheet-result-count" id="sheet1Count">-</div>
                         <div class="sheet-result-status" id="sheet1Status">확인 중</div>
                     </div>
@@ -364,7 +416,7 @@
             <!-- KNX 테이블 -->
             <div class="mini-table-section">
                 <div class="table-header">
-                    <h4><i class="fas fa-paper-plane" style="color:var(--blue)"></i> Knox 발송 상세</h4>
+                    <h4><i class="fas fa-paper-plane" style="color:var(--blue)"></i> KNX 발송 상세</h4>
                     <div class="table-controls">
                         <input type="text" id="knxSearch" placeholder="검색..." class="search-input sm">
                         <span class="row-count" id="knxRowCount">0건</span>
@@ -642,3 +694,5 @@
 <script src="js/main.js"></script>
 </body>
 </html>
+
+
