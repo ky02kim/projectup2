@@ -1,833 +1,650 @@
-/* ======================================================
-   기업건강의학센터 업무 현황 대시보드 — main.js
-   ====================================================== */
+/* ============================================================================
+   기업건강의학센터 | 업무 현황 대시보드 - main.js
+   ----------------------------------------------------------------------------
+   읽는 데이터(전역 변수, data/*.js 에서 정의됨):
+     - KNX_DATA : KNX 발송 배열
+     - REQ_DATA : 자료요청 회신 배열
+     - HGC_DATA : 정기 전송(사후관리) 배열
 
-// ── 상수 ─────────────────────────────────────────────
-// KNX 시트1: H(7)~P(15) = 9개 항목
-// 자료요청 시트2: K(10)~S(18) = 9개 항목
-const ITEM_LABELS = ['사후세로형','사후가로형','뇌심','직무','정신','동의자결과','사업장양식','사이트업로드','통계자료'];
-const PAGE      = 50;
-const API_BW    = 'tables/biweekly_report';
-const API_ETC   = 'tables/etc_work';
+   ⚠ 아래 표시(⚠)된 부분은 요구사항이 명확치 않아 임의로 정한 부분입니다.
+     다르면 알려주시면 바로 수정할게요.
+   ============================================================================ */
 
-/* ── localStorage 헬퍼 ──────────────────────────────── */
-function lsUUID() {
-    try {
-        return crypto.randomUUID();
-    } catch(e) {
-        // fallback (구형 브라우저)
-        return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
-            (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16));
+(() => {
+  'use strict';
+
+  // ============================================================
+  // 0. 데이터 로드 & 상수
+  // ============================================================
+  const knxData = (typeof KNX_DATA !== 'undefined' && Array.isArray(KNX_DATA)) ? KNX_DATA : [];
+  const reqData = (typeof REQ_DATA !== 'undefined' && Array.isArray(REQ_DATA)) ? REQ_DATA : [];
+  const hgcData = (typeof HGC_DATA !== 'undefined' && Array.isArray(HGC_DATA)) ? HGC_DATA : [];
+
+  // KNX/REQ items[9] 순서 - 표 헤더(세로,가로,뇌심,직무,정신,동의자,사업장양식,사이트,통계) 기준
+  const ITEM_LABELS = ['세로', '가로', '뇌심', '직무', '정신', '동의자', '사업장양식', '사이트', '통계'];
+
+  // ⚠ HGC items[4] 순서: 뇌심, 직무, 감정노동, 건진데이터 (사용자 확인 내용 그대로 적용)
+  const HGC_ITEM_LABELS = ['뇌심', '직무', '감정노동', '건진데이터'];
+
+  const today = new Date();
+  const CURRENT_YEAR = today.getFullYear();
+  const CURRENT_MONTH = today.getMonth() + 1;
+
+  const PALETTE = ['#3b82f6', '#22c55e', '#f97316', '#a855f7', '#14b8a6', '#eab308', '#ef4444', '#6366f1', '#ec4899'];
+
+  const charts = {}; // Chart.js 인스턴스 캐시
+
+  // 필터 상태 (섹션 B/C/D 공용)
+  const filterState = { year: 'all', jongYe: 'all' };
+
+  // 기타업무(비만/SWI/옴부즈만) - 세션 중 메모리 저장, JSON 내보내기/가져오기로 관리
+  const etcData = { biman: [], swi: [], ombu: [] };
+  const ETC_TYPES = [
+    { key: 'biman', name: '비만 관리' },
+    { key: 'swi', name: 'SWI' },
+    { key: 'ombu', name: '옴부즈만' }
+  ];
+
+  let pendingDelete = null; // {type:'etc', kind, id} - 삭제 확인 모달용
+
+  // ============================================================
+  // 1. 공용 유틸
+  // ============================================================
+  const $ = (id) => document.getElementById(id);
+  const setText = (id, val) => { const e = $(id); if (e) e.textContent = val; };
+  const fmt = (n) => (n || 0).toLocaleString('ko-KR');
+
+  function byYear(arr, y) { return y === 'all' ? arr : arr.filter(d => Number(d.y) === Number(y)); }
+  function byJongYe(arr, jy) { return jy === 'all' ? arr : arr.filter(d => d.jongYe === jy); }
+  function applyFilter(arr) { return byJongYe(byYear(arr, filterState.year), filterState.jongYe); }
+
+  function monthlyCounts(arr, dateField = 'm') {
+    const m = Array(12).fill(0);
+    arr.forEach(d => { const mo = Number(d[dateField]); if (mo >= 1 && mo <= 12) m[mo - 1]++; });
+    return m;
+  }
+
+  function sumItems(arr, len = 9) {
+    const s = Array(len).fill(0);
+    arr.forEach(d => (d.items || []).forEach((v, i) => { if (i < len) s[i] += (typeof v === 'boolean' ? (v ? 1 : 0) : (Number(v) || 0)); }));
+    return s;
+  }
+
+  function topNGroups(arr, field, n = 10) {
+    const map = {};
+    arr.forEach(d => { const k = d[field] || '(미상)'; map[k] = (map[k] || 0) + 1; });
+    return Object.entries(map).sort((a, b) => b[1] - a[1]).slice(0, n);
+  }
+
+  // 비고/메모 텍스트를 구분자 기준 토큰화 후 빈도 Top N (요청 자료 Top10 차트용)
+  function tokenizeTop(arr, field, n = 10) {
+    const map = {};
+    arr.forEach(d => {
+      const raw = d[field];
+      if (!raw) return;
+      String(raw).split(/[,\/·、\n]+/).map(s => s.trim()).filter(Boolean)
+        .forEach(tok => { map[tok] = (map[tok] || 0) + 1; });
+    });
+    return Object.entries(map).sort((a, b) => b[1] - a[1]).slice(0, n);
+  }
+
+  function destroyChart(key) { if (charts[key]) { charts[key].destroy(); delete charts[key]; } }
+
+  function barChart(canvasId, key, labels, data, color, horizontal = false) {
+    const ctx = $(canvasId); if (!ctx) return;
+    destroyChart(key);
+    charts[key] = new Chart(ctx, {
+      type: 'bar',
+      data: { labels, datasets: [{ data, backgroundColor: color, borderRadius: 4 }] },
+      options: {
+        indexAxis: horizontal ? 'y' : 'x',
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: { x: { beginAtZero: true }, y: { beginAtZero: true } }
+      }
+    });
+  }
+
+  function lineChart(canvasId, key, labels, datasets) {
+    const ctx = $(canvasId); if (!ctx) return;
+    destroyChart(key);
+    charts[key] = new Chart(ctx, {
+      type: 'line',
+      data: { labels, datasets: datasets.map((ds, i) => ({ tension: 0.3, borderWidth: 2, ...ds })) },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: datasets.length > 1 } },
+        scales: { y: { beginAtZero: true } }
+      }
+    });
+  }
+
+  function downloadJSON(filename, data) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // ============================================================
+  // 2. 탭 전환
+  // ============================================================
+  function initTabs() {
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+        btn.classList.add('active');
+        const target = $(btn.dataset.tab);
+        if (target) target.classList.add('active');
+      });
+    });
+  }
+
+  // ============================================================
+  // 3. 헤더 상태 & 시계
+  // ============================================================
+  function initHeaderStatus() {
+    const loaded = knxData.length || reqData.length || hgcData.length;
+    const statusEl = $('dataStatus');
+    if (statusEl) {
+      statusEl.innerHTML = loaded
+        ? '<span class="status-dot ok"></span> 데이터 로드됨'
+        : '<span class="status-dot idle"></span> 데이터 미로드';
     }
-}
-function lsSave(key, record) {
-    const arr = lsLoad(key);
-    arr.push(record);
-    try {
-        localStorage.setItem(key, JSON.stringify(arr));
-    } catch(e) {
-        showToast('저장 공간이 부족합니다.', 'error');
-        console.error('[lsSave] 저장 실패:', e);
-    }
-}
-function lsLoad(key) {
-    try {
-        return JSON.parse(localStorage.getItem(key) || '[]');
-    } catch(e) {
-        console.warn('[lsLoad] 파싱 실패, 초기화:', key, e);
-        return [];
-    }
-}
-function lsDelete(key, id) {
-    const arr = lsLoad(key).filter(r => r.id !== id);
-    try {
-        localStorage.setItem(key, JSON.stringify(arr));
-    } catch(e) {
-        console.error('[lsDelete] 삭제 실패:', e);
-    }
-}
-
-// ── 색상 팔레트 (라이트 테마) ────────────────────────
-const C = {
-    blue:  'rgba(30,115,230,0.85)',   green: 'rgba(22,163,74,0.85)',
-    orange:'rgba(234,88,12,0.85)',    purple:'rgba(124,58,237,0.85)',
-    teal:  'rgba(13,148,136,0.85)',   red:   'rgba(220,38,38,0.85)',
-    yellow:'rgba(217,119,6,0.85)',    pink:  'rgba(219,39,119,0.85)',
-    sky:   'rgba(2,132,199,0.85)',
-};
-const PALETTE = Object.values(C);
-
-// ── 전역 상태 ─────────────────────────────────────────
-const state = {
-    knx:  { raw:[], filtered:[], page:1, search:'' },
-    req:  { raw:[], filtered:[], page:1, search:'' },
-    bw:   { records:[], filtered:[] },
-    etc:  { biman:[], swi:[], ombu:[] },
-    visFilters: { year:'all', jy:'all' },
-};
-const CH = {};
-let deleteTargetId = null;
-let deleteTargetTable = null;
-
-// ── DOM Ready ──────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
-    Chart.defaults.color = '#64748B';
-    Chart.defaults.font.family = "'Noto Sans KR', sans-serif";
-    Chart.defaults.font.size = 11;
-    initClock();
-    initTabs();
-    initVisFilters();
-    initBiweeklyForm();
-    initSearches();
-    initEtcForms();
-    loadExternalData();   // window.KNX_DATA / window.REQ_DATA 로드
-    loadBiweeklyData();
-    loadEtcData();
-});
-
-/* =====================================================
-   공통 유틸
-   ===================================================== */
-function initClock() {
-    const el = document.getElementById('currentTime');
-    const tick = () => { el.textContent = new Date().toLocaleString('ko-KR',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}); };
+    const tick = () => setText('currentTime', new Date().toLocaleString('ko-KR', { hour12: false }));
     tick(); setInterval(tick, 1000);
-}
 
-function showToast(msg, type='success') {
-    let t = document.getElementById('__toast');
-    if (!t) { t=document.createElement('div'); t.id='__toast'; t.className='toast'; document.body.appendChild(t); }
-    t.className=`toast ${type}`;
-    t.innerHTML=`<i class="fas fa-${type==='success'?'check-circle':'exclamation-circle'}"></i> ${msg}`;
-    t.classList.add('show');
-    clearTimeout(t._t); t._t = setTimeout(()=>t.classList.remove('show'), 3000);
-}
+    setText('knxSheetStatus', knxData.length ? `${fmt(knxData.length)}건 로드됨` : '데이터 없음');
+    setText('reqSheetStatus', reqData.length ? `${fmt(reqData.length)}건 로드됨` : '데이터 없음');
 
-const pad = n => String(n).padStart(2,'0');
-function setEl(id, val) { const e=document.getElementById(id); if(e) e.textContent=val; }
-function toggleActive(container, btn) {
-    container.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));
-    btn.classList.add('active');
-}
+    setText('sheet1Count', fmt(knxData.length));
+    setText('sheet1Status', knxData.length ? '정상' : '데이터 없음');
+    setText('sheet2Count', fmt(reqData.length));
+    setText('sheet2Status', reqData.length ? '정상' : '데이터 없음');
+  }
 
-// ── 예/종건 → {ye, jong} 각 카운트 (종예건 = 예건1+종건1) ──
-function parseJY(val) {
-    const v = String(val||'').trim();
-    const hasYe  = v.includes('예건') || v==='예';
-    const hasJong = v.includes('종건') || v==='종';
-    if (hasYe && hasJong) return { ye:1, jong:1, label:'종예건' };
-    if (hasYe)            return { ye:1, jong:0, label:'예건' };
-    if (hasJong)          return { ye:0, jong:1, label:'종건' };
-    return { ye:0, jong:0, label:v||'기타' };
-}
+  // ============================================================
+  // 4. 연도 필터 버튼 동적 생성
+  // ============================================================
+  function initFilters() {
+    const years = new Set();
+    [...knxData, ...reqData].forEach(d => { if (d.y) years.add(Number(d.y)); });
+    hgcData.forEach(d => { const yr = hgcRecordYear(d); if (yr) years.add(yr); });
+    const sortedYears = [...years].sort((a, b) => b - a);
 
-function jongYeBadge(val) {
-    if (!val) return '<span class="badge b-etc">-</span>';
-    const jy = parseJY(val);
-    if (jy.ye && jy.jong) return `<span class="badge b-both">${val}</span>`;
-    if (jy.ye)            return `<span class="badge b-ye">${val}</span>`;
-    if (jy.jong)          return `<span class="badge b-jong">${val}</span>`;
-    return `<span class="badge b-etc">${val}</span>`;
-}
-function provBadge(v){return v==='정기'?`<span class="badge b-reg">정기</span>`:v?`<span class="badge b-etc">${v}</span>`:'<span class="badge b-etc">-</span>';}
-function ck(v){return v?'<i class="fas fa-check ck"></i>':'<i class="fas fa-minus uck"></i>';}
-
-function destroyChart(key) { if(CH[key]){ CH[key].destroy(); delete CH[key]; } }
-
-/** canvas 요소가 없으면 null 반환, 있으면 Chart 인스턴스 반환 */
-function safeChart(canvasId, config) {
-    const el = document.getElementById(canvasId);
-    if(!el) { console.warn('[safeChart] canvas 없음:', canvasId); return null; }
-    // NaN/undefined/Infinity 값 정제
-    if(config?.data?.datasets) {
-        config.data.datasets = config.data.datasets.map(ds=>({
-            ...ds,
-            data: (ds.data||[]).map(v=>(typeof v==='number'&&isFinite(v))?v:0)
-        }));
+    const yearBox = $('visYearFilter');
+    if (yearBox) {
+      sortedYears.forEach(y => {
+        const btn = document.createElement('button');
+        btn.className = 'filter-btn'; btn.dataset.year = y; btn.textContent = `${y}년`;
+        yearBox.appendChild(btn);
+      });
+      yearBox.addEventListener('click', (e) => {
+        const btn = e.target.closest('.filter-btn'); if (!btn) return;
+        yearBox.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        filterState.year = btn.dataset.year;
+        renderAll();
+      });
     }
-    return new Chart(el, config);
-}
 
-function barOpts(stacked=false, indexAxis='x') {
-    return { responsive:true, maintainAspectRatio:false, indexAxis,
-        plugins:{
-            legend:{position:'bottom',labels:{color:'#475569',padding:10,boxWidth:10}},
-            tooltip:{backgroundColor:'#1E293B',titleColor:'#F1F5F9',bodyColor:'#CBD5E1',borderColor:'#334155',borderWidth:1,padding:10}
-        },
-        scales:{
-            x:{stacked, grid:{color:'rgba(0,0,0,.05)'}, ticks:{color:'#64748B'}},
-            y:{stacked, grid:{color:'rgba(0,0,0,.06)'}, ticks:{color:'#64748B'}}
-        }
-    };
-}
-function pieOpts() {
-    return { responsive:true, maintainAspectRatio:false, cutout:'55%',
-        plugins:{
-            legend:{position:'bottom',labels:{color:'#475569',padding:8,boxWidth:10}},
-            tooltip:{backgroundColor:'#1E293B',titleColor:'#F1F5F9',bodyColor:'#CBD5E1',borderColor:'#334155',borderWidth:1}
-        }
-    };
-}
-function lineOpts() {
-    return { responsive:true, maintainAspectRatio:false,
-        plugins:{
-            legend:{position:'bottom',labels:{color:'#475569',padding:10,boxWidth:10}},
-            tooltip:{backgroundColor:'#1E293B',titleColor:'#F1F5F9',bodyColor:'#CBD5E1',borderColor:'#334155',borderWidth:1,padding:10}
-        },
-        scales:{
-            x:{grid:{color:'rgba(0,0,0,.05)'},ticks:{color:'#64748B',maxTicksLimit:16}},
-            y:{grid:{color:'rgba(0,0,0,.06)'},ticks:{color:'#64748B'}}
-        }
-    };
-}
-
-/* =====================================================
-   탭 전환
-   ===================================================== */
-function initTabs() {
-    document.querySelectorAll('.tab-btn').forEach(btn=>{
-        btn.addEventListener('click',()=>{
-            document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
-            btn.classList.add('active');
-            document.getElementById(btn.dataset.tab).classList.add('active');
-        });
-    });
-}
-
-/* =====================================================
-   시각화 탭 필터
-   ===================================================== */
-function initVisFilters() {
-    document.getElementById('visYearFilter').addEventListener('click', e=>{
-        const btn=e.target.closest('.filter-btn'); if(!btn) return;
-        state.visFilters.year = btn.dataset.year==='all' ? 'all' : parseInt(btn.dataset.year);
-        toggleActive(document.getElementById('visYearFilter'), btn);
-        applyVisFilters();
-    });
-    document.getElementById('visJyFilter').addEventListener('click', e=>{
-        const btn=e.target.closest('.filter-btn'); if(!btn) return;
-        state.visFilters.jy = btn.dataset.jy;
-        toggleActive(document.getElementById('visJyFilter'), btn);
-        applyVisFilters();
-    });
-}
-
-function updateVisYearFilterButtons() {
-    const years = new Set([
-        ...state.knx.raw.map(r=>r.y),
-        ...state.req.raw.map(r=>r.y),
-        ...state.bw.records.map(r=>parseInt(r.send_date?.substring(0,4))||0)
-    ].filter(y=>y>2000));
-    const sorted = [...years].sort();
-    const container = document.getElementById('visYearFilter');
-    container.innerHTML='<button class="filter-btn" data-year="all">전체</button>';
-    sorted.forEach(y=>{
-        const b=document.createElement('button'); b.className='filter-btn'; b.dataset.year=y; b.textContent=y+'년'; container.appendChild(b);
-    });
-    const curY=new Date().getFullYear();
-    // 데이터에 현재 연도가 있으면 자동 선택 (최초 1회만)
-    if(sorted.includes(curY) && state.visFilters.year==='all') state.visFilters.year=curY;
-    // 선택된 연도 버튼 하이라이트
-    container.querySelectorAll('.filter-btn').forEach(b=>{
-        const isAll = b.dataset.year==='all' && state.visFilters.year==='all';
-        const isYear = String(b.dataset.year)===String(state.visFilters.year);
-        b.classList.toggle('active', isAll || isYear);
-    });
-}
-
-// ── 예/종건 필터 적용 로직 (종예건은 both=예건+종건이므로 '예건'/'종건' 모두에 포함) ──
-function matchJY(jyLabel, filter) {
-    if (filter==='all') return true;
-    const jy = parseJY(jyLabel);
-    if (filter==='예건') return jy.ye > 0;
-    if (filter==='종건') return jy.jong > 0;
-    return true;
-}
-
-function applyVisFilters() {
-    const {year, jy} = state.visFilters;
-    state.knx.filtered = state.knx.raw.filter(r=>{
-        if (year!=='all' && r.y!==year) return false;
-        if (!matchJY(r.jongYe, jy)) return false;
-        return true;
-    });
-    state.req.filtered = state.req.raw.filter(r=>{
-        if (year!=='all' && r.y!==year) return false;
-        if (!matchJY(r.jongYe, jy)) return false;
-        return true;
-    });
-    state.bw.filtered = state.bw.records.filter(r=>{
-        if (year!=='all' && r.send_date?.substring(0,4)!==String(year)) return false;
-        return true;
-    });
-    renderVisAll();
-}
-
-/* =====================================================
-   시각화 탭 렌더링
-   ===================================================== */
-function renderVisAll() {
-    renderVisBwKPI(); renderVisBwCharts();
-    renderVisKnxKPI(); renderVisKnxCharts();
-    renderVisReqKPI(); renderVisReqCharts();
-    renderVisCombinedChart();
-    updateDataStatus();
-}
-
-// A. 정기 발송
-function renderVisBwKPI() {
-    const now = new Date();
-    const curY = now.getFullYear(), curM = now.getMonth()+1, curD = now.getDate();
-    const all  = state.bw.records.filter(r=>r.send_date?.startsWith(String(curY)));
-    setEl('v_bw_total',   all.length);
-    setEl('v_bw_sogyeon', all.reduce((sum,r)=> sum + Number(r.jong_count||0)+ Number(r.ye_count||0),0));
-    setEl('v_bw_noesim',  all.filter(r=>r.report_type==='뇌심·직무').reduce((sum,r)=>sum+Number(r.jong_count||0)+Number(r.ye_count||0),0));
-    const latest = state.bw.records.length ? state.bw.records[0].send_date : '-';
-    setEl('v_bw_month', latest);
-}
-function renderVisBwCharts() {
-    const data=state.bw.filtered;
-    const months=Array.from({length:12},(_,i)=>`${i+1}월`);
-    const ye = Array (12).fill(0);
-    const jong = Array (23).fill(0);
-    data.forEach(r=>{ const m=parseInt(r.send_date?.substring(5,7)||'')-1; if(!isNaN(m)&&m>=0&&m<12){ jong[m] += Number(r.jong_count || 0); ye[m] += Number(r.ye_count || 0); } });
-    destroyChart('v_bwMonthly');
-    CH.v_bwMonthly = safeChart('v_bwMonthlyChart',{
-        type:'bar',
-        data:{labels:months,datasets:[{label:'종건',data:jong,backgroundColor:C.green,borderRadius:4},{label:'예건',data:ye,backgroundColor:C.yellow,borderRadius:4}]},
-        options:barOpts(true)
-    });
-}
-
-// B. KNX — 예/종건 카운트 시 종예건은 ye+jong 각 1씩
-function renderVisKnxKPI() {
-    const curY=new Date().getFullYear(), curM=new Date().getMonth()+1;
-    const all  = state.knx.raw.filter(r=>r.y===curY);
-    const filt = state.knx.filtered;
-    const month= filt.filter(r=>r.y===curY&&r.m===curM);
-    const clients = new Set(filt.map(r=>(r.workplace||r.group||'').trim()).filter(Boolean));
-    const items   = filt.reduce((s,r)=>s+r.itemSum,0);
-    setEl('v_knx_total',   all.length.toLocaleString());
-    setEl('v_knx_month',   month.length.toLocaleString());
-    setEl('v_knx_clients', clients.size.toLocaleString());
-    setEl('v_knx_items',   items.toLocaleString());
-    setEl('knxSheetStatus', all.length>0 ? `✓ ${all.length}건` : '미로드');
-}
-function renderVisKnxCharts() {
-    const data = state.knx.filtered;
-    const months = Array.from({length:12},(_,i)=>`${i+1}월`);
-    // 예건/종건 각각 카운트 (종예건 = 각 1씩)
-    const yeC=Array(12).fill(0), jC=Array(12).fill(0);
-    data.forEach(r=>{ const m=r.m-1; if(m<0||m>11||isNaN(m)) return; const jy=parseJY(r.jongYe); yeC[m]+=jy.ye; jC[m]+=jy.jong; });
-    destroyChart('v_knxMonthly');
-    CH.v_knxMonthly = safeChart('v_knxMonthlyChart',{
-        type:'bar',
-        data:{labels:months,datasets:[{label:'예건',data:yeC,backgroundColor:C.blue,borderRadius:4},{label:'종건',data:jC,backgroundColor:C.green,borderRadius:4}]},
-        options:barOpts(true)
-    });
-
-    // 거래처별 Top10 (사업장명 기준)
-    const gMap={};
-    data.forEach(r=>{ const g=r.workplace||r.group||'미지정'; gMap[g]=(gMap[g]||0)+1; });
-    const sorted=Object.entries(gMap).sort((a,b)=>b[1]-a[1]).slice(0,10);
-    destroyChart('v_knxGroup');
-    CH.v_knxGroup = safeChart('v_knxGroupChart',{
-        type:'bar',
-        data:{labels:sorted.map(e=>e[0]),datasets:[{label:'건수',data:sorted.map(e=>e[1]),backgroundColor:C.purple,borderRadius:4}]},
-        options:{...barOpts(false,'y'),plugins:{...barOpts().plugins,legend:{display:false}}}
-    });
-
-    // 항목별
-    const itemT=ITEM_LABELS.map((_,i)=>data.reduce((s,r)=>{
-        if(!Array.isArray(r.items)||r.items.length<=i) return s;
-        return s+(r.items[i]||0);
-    },0));
-    destroyChart('v_knxItem');
-    CH.v_knxItem = safeChart('v_knxItemChart',{
-        type:'bar',
-        data:{labels:ITEM_LABELS,datasets:[{label:'건수',data:itemT,backgroundColor:PALETTE,borderRadius:4}]},
-        options:{...barOpts(),plugins:{...barOpts().plugins,legend:{display:false}}}
-    });
-
-    // 요청 자료 Top10 (KNX 비고 기준)
-    renderMemoTop10Chart(data, 'v_knxMemoChart', 'v_knxMemo', C.teal);
-}
-
-// C. 자료요청
-function renderVisReqKPI() {
-    const curY=new Date().getFullYear(), curM=new Date().getMonth()+1;
-    const all  = state.req.raw.filter(r=>r.y===curY);
-    const filt = state.req.filtered;
-    const month= filt.filter(r=>r.y===curY&&r.m===curM);
-    const clients=new Set(filt.map(r=>(r.workplace||r.group||'').trim()).filter(Boolean));
-    const items  =filt.reduce((s,r)=>s+r.itemSum,0);
-    setEl('v_req_total',   all.length.toLocaleString());
-    setEl('v_req_month',   month.length.toLocaleString());
-    setEl('v_req_clients', clients.size.toLocaleString());
-    setEl('v_req_items',   items.toLocaleString());
-    setEl('reqSheetStatus', all.length>0 ? `✓ ${all.length}건` : '미로드');
-}
-function renderVisReqCharts() {
-    const data=state.req.filtered;
-    const months=Array.from({length:12},(_,i)=>`${i+1}월`);
-    const mC=Array(12).fill(0);
-    data.forEach(r=>{ const mi=r.m-1; if(mi>=0&&mi<12&&!isNaN(mi)) mC[mi]++; });
-    destroyChart('v_reqMonthly');
-    CH.v_reqMonthly = safeChart('v_reqMonthlyChart',{
-        type:'bar',
-        data:{labels:months,datasets:[{label:'회신 건수',data:mC,backgroundColor:C.orange,borderRadius:4}]},
-        options:{...barOpts(),plugins:{...barOpts().plugins,legend:{display:false}}}
-    });
-
-    const gMap={};
-    data.forEach(r=>{ const g=r.workplace||r.group||'미지정'; gMap[g]=(gMap[g]||0)+1; });
-    const sorted=Object.entries(gMap).sort((a,b)=>b[1]-a[1]).slice(0,10);
-    destroyChart('v_reqGroup');
-    CH.v_reqGroup = safeChart('v_reqGroupChart',{
-        type:'bar',
-        data:{labels:sorted.map(e=>e[0]),datasets:[{label:'건수',data:sorted.map(e=>e[1]),backgroundColor:C.blue,borderRadius:4}]},
-        options:{...barOpts(false,'y'),plugins:{...barOpts().plugins,legend:{display:false}}}
-    });
-
-    const itemT=ITEM_LABELS.map((_,i)=>data.reduce((s,r)=>{
-        if(!Array.isArray(r.items)||r.items.length<=i) return s;
-        return s+(r.items[i]||0);
-    },0));
-    destroyChart('v_reqItem');
-    CH.v_reqItem = safeChart('v_reqItemChart',{
-        type:'bar',
-        data:{labels:ITEM_LABELS,datasets:[{label:'건수',data:itemT,backgroundColor:PALETTE,borderRadius:4}]},
-        options:{...barOpts(),plugins:{...barOpts().plugins,legend:{display:false}}}
-    });
-
-    // 요청 자료 Top10 (자료요청서 비고 기준)
-    renderMemoTop10Chart(data, 'v_reqMemoChart', 'v_reqMemo', C.orange);
-}
-
-/* =====================================================
-   공통: 비고 기반 요청 자료 Top10 차트
-   비고 필드(memo/note)를 쉼표·슬래시·공백으로 split →
-   빈도순 정렬 후 상위 10개 수평 막대 차트
-   ===================================================== */
-function parseMemoTokens(str) {
-    if(!str || typeof str !== 'string') return [];
-    // 쉼표, 슬래시, ·, &, +, 공백(2개 이상) 기준 split, 앞뒤 공백 제거
-    return str.split(/[,\/·&+]|  +/)
-        .map(t=>t.trim())
-        .filter(t=>t.length >= 2);   // 1자 이하 토큰 제외
-}
-
-function renderMemoTop10Chart(data, canvasId, chartKey, color) {
-    // 비고: KNX는 r.memo, 요청서는 r.note 사용 (둘 다 fallback)
-    const freq = {};
-    data.forEach(r=>{
-        const raw = r.memo || r.note || '';
-        parseMemoTokens(raw).forEach(token=>{
-            const k = token;
-            freq[k] = (freq[k]||0) + 1;
-        });
-    });
-    const sorted = Object.entries(freq).sort((a,b)=>b[1]-a[1]).slice(0,10);
-    destroyChart(chartKey);
-    if(!sorted.length) {
-        CH[chartKey] = safeChart(canvasId, {
-            type:'bar',
-            data:{labels:['비고 데이터 없음'],datasets:[{label:'건수',data:[0],backgroundColor:'rgba(100,116,139,.15)',borderRadius:4}]},
-            options:{...barOpts(false,'y'),plugins:{...barOpts().plugins,legend:{display:false}}}
-        });
-        return;
+    const jyBox = $('visJyFilter');
+    if (jyBox) {
+      jyBox.addEventListener('click', (e) => {
+        const btn = e.target.closest('.filter-btn'); if (!btn) return;
+        jyBox.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        filterState.jongYe = btn.dataset.jy;
+        renderAll();
+      });
     }
-    CH[chartKey] = safeChart(canvasId, {
+  }
+
+  // ============================================================
+  // 5. 섹션 A: 정기 전송 (HGC_DATA 기반) - 사용자 제공 스펙 그대로 구현
+  // ============================================================
+  // 날짜 기준: periodStart ~ periodEnd (fileDate 사용 안 함)
+  function hgcRecordYear(d) { return Number(((d.periodStart || '') + '').slice(0, 4)); }
+
+  // 전역 연도/예종건 필터를 HGC_DATA에도 동일하게 적용
+  function applyHgcFilter(arr) {
+    return arr.filter(d => {
+      const yearOk = filterState.year === 'all' || hgcRecordYear(d) === Number(filterState.year);
+      const jyOk = filterState.jongYe === 'all' || d.jongYe === filterState.jongYe;
+      return yearOk && jyOk;
+    });
+  }
+
+  // 6개 고정 카테고리 (items = [뇌심, 직무, 감정노동, 건진데이터])
+  const HGC_CATEGORIES = [
+    { name: '사후관리소견서', match: () => true },
+    { name: '뇌심·직무', match: (it) => it[0] || it[1] },
+    { name: '뇌심', match: (it) => it[0] },
+    { name: '직무', match: (it) => it[1] },
+    { name: '감정노동', match: (it) => it[2] },
+    { name: '건진데이터', match: (it) => it[3] }
+  ];
+
+  const fmtMD = (s) => { if (!s) return '-'; const [, m, d] = s.split('-'); return `${Number(m)}/${Number(d)}`; };
+  const fmtSheetName = (s) => { if (!s) return '-'; const [, m, d] = s.split('-'); return `${Number(m)}.${Number(d)}`; };
+
+  // periodStart+periodEnd 기준 그룹화(=엑셀 시트 1개), periodStart 내림차순 정렬
+  function groupHgcByPeriod(arr) {
+    const map = new Map();
+    arr.forEach(d => {
+      const key = `${d.periodStart}_${d.periodEnd}`;
+      if (!map.has(key)) map.set(key, { periodStart: d.periodStart, periodEnd: d.periodEnd, records: [] });
+      map.get(key).records.push(d);
+    });
+    return [...map.values()].sort((a, b) => (b.periodStart || '').localeCompare(a.periodStart || ''));
+  }
+
+  // 카테고리 하나에 대한 종건/예건 집계: total=target 수, complete=complete 수
+  function summarizeCategory(records) {
+    const hasComplete = records.some(d => d.status === 'complete');
+    const statusText = records.length === 0 ? '-' : (hasComplete ? '발송완료' : '발송예정');
+    const jyLines = [];
+    ['종건', '예건'].forEach(jy => {
+      const jyRecords = records.filter(d => d.jongYe === jy);
+      const total = jyRecords.filter(d => d.status === 'target').length;
+      const complete = jyRecords.filter(d => d.status === 'complete').length;
+      if (total > 0) jyLines.push(complete > 0 ? `${jy} ${complete}/${total}` : `${jy} ${total}`);
+    });
+    return { statusText, workplaceText: jyLines.length ? jyLines.join('<br>') : '-' };
+  }
+
+  // 스펙대로 시트(기간)별 x 카테고리별 표 데이터 생성
+  function buildHgcReportSheets(filteredRecords) {
+    return groupHgcByPeriod(filteredRecords).map(group => {
+      const periodText = `${fmtMD(group.periodStart)}~${fmtMD(group.periodEnd)}`;
+      const rows = HGC_CATEGORIES.map(cat => {
+        const matched = group.records.filter(d => cat.match(d.items || []));
+        const { statusText, workplaceText } = summarizeCategory(matched);
+        return { category: cat.name, periodText, workplaceText, statusText };
+      });
+      return { sheetName: `${fmtSheetName(group.periodStart)}-${fmtSheetName(group.periodEnd)}`, periodStart: group.periodStart, rows };
+    });
+  }
+
+  function countByJongYe(arr) {
+    return { 예건: arr.filter(d => d.jongYe === '예건').length, 종건: arr.filter(d => d.jongYe === '종건').length };
+  }
+  function jySubLabel(counts) {
+    return `<span style="font-size:12px;color:var(--muted,#888)">예건 ${fmt(counts.예건)} / 종건 ${fmt(counts.종건)}</span>`;
+  }
+  // 카드 라벨 텍스트를 동적으로 교체 (값 요소 바로 앞 형제 요소에 "발송"이 포함되면 교체)
+  function relabelKpi(valueId, newLabel) {
+    const valEl = $(valueId);
+    const labelEl = valEl && valEl.previousElementSibling;
+    if (labelEl && /발송/.test(labelEl.textContent)) labelEl.textContent = newLabel;
+  }
+
+  function renderSectionA() {
+    const filtered = applyHgcFilter(hgcData);
+    const complete = filtered.filter(d => d.status === 'complete');
+    const target = filtered.filter(d => d.status === 'target');
+
+    // 총 발송 회차: 완료 건수(메인) + 대상 건수(괄호) + 예/종건 구분
+    const totalEl = $('v_bw_total');
+    if (totalEl) {
+      totalEl.innerHTML = `${fmt(complete.length)} <span style="font-size:12px;color:var(--muted,#888)">(대상 ${fmt(target.length)})</span><br>${jySubLabel(countByJongYe(complete))}`;
+    }
+
+    // 사후관리소견서 = 전체 레코드, 뇌심·직무 = items[0]뇌심 또는 items[1]직무 (스펙과 동일한 필터)
+    const sogyeonRows = complete;
+    const sogyeonEl = $('v_bw_sogyeon');
+    if (sogyeonEl) sogyeonEl.innerHTML = `${fmt(sogyeonRows.length)}<br>${jySubLabel(countByJongYe(sogyeonRows))}`;
+
+    const noesimRows = complete.filter(d => (d.items || [])[0] || (d.items || [])[1]);
+    const noesimEl = $('v_bw_noesim');
+    if (noesimEl) noesimEl.innerHTML = `${fmt(noesimRows.length)}<br>${jySubLabel(countByJongYe(noesimRows))}`;
+
+    // 최근 발송 데이터: 가장 최근 target 레코드의 대상기간(periodStart~periodEnd)
+    const latestTarget = target.slice().sort((a, b) => (b.periodStart || '').localeCompare(a.periodStart || ''))[0];
+    const dateRangeText = latestTarget ? `${latestTarget.periodStart || '-'} ~ ${latestTarget.periodEnd || '-'}` : '-';
+    setText('v_bw_month', dateRangeText);
+    relabelKpi('v_bw_month', '최근 발송 데이터');
+
+    // 월별 정기 전송 현황 - 예건/종건 구분 그래프 (periodStart의 월 기준)
+    const monthOf = (d) => Number(((d.periodStart || '') + '').split('-')[1]);
+    const months12 = ['1월','2월','3월','4월','5월','6월','7월','8월','9월','10월','11월','12월'];
+    const yeMonths = Array(12).fill(0), jgMonths = Array(12).fill(0);
+    complete.forEach(d => {
+      const mo = monthOf(d);
+      if (mo >= 1 && mo <= 12) {
+        if (d.jongYe === '예건') yeMonths[mo - 1]++;
+        else if (d.jongYe === '종건') jgMonths[mo - 1]++;
+      }
+    });
+    destroyChart('bwMonthly');
+    const ctx = $('v_bwMonthlyChart');
+    if (ctx) {
+      charts.bwMonthly = new Chart(ctx, {
         type: 'bar',
-        data: {
-            labels: sorted.map(e=>e[0]),
-            datasets: [{
-                label: '건수',
-                data:   sorted.map(e=>e[1]),
-                backgroundColor: color,
-                borderRadius: 4,
-            }]
-        },
-        options: {
-            ...barOpts(false,'y'),
-            plugins: { ...barOpts().plugins, legend:{display:false} }
-        }
-    });
-}
-
-// D. 종합 비교
-function renderVisCombinedChart() {
-    const ymBw  = state.bw.filtered.map(r=>{const y=r.send_date?.substring(0,4),m=r.send_date?.substring(5,7);return y&&m?`${y}-${m}`:null;}).filter(Boolean);
-    const ymKnx = state.knx.filtered.map(r=>`${r.y}-${pad(r.m)}`);
-    const ymReq = state.req.filtered.map(r=>`${r.y}-${pad(r.m)}`);
-    const ymSet = [...new Set([...ymBw,...ymKnx,...ymReq])].sort();
-    const bwD  =ymSet.map(ym=>state.bw.filtered.filter(r=>{const[y,m]=ym.split('-');return r.send_date?.startsWith(y+'-'+m);}).length);
-    const knxD =ymSet.map(ym=>{const[y,m]=ym.split('-').map(Number);return state.knx.filtered.filter(r=>r.y===y&&r.m===m).length;});
-    const reqD =ymSet.map(ym=>{const[y,m]=ym.split('-').map(Number);return state.req.filtered.filter(r=>r.y===y&&r.m===m).length;});
-    destroyChart('v_combined');
-    CH.v_combined = safeChart('v_combinedChart',{
-        type:'line',
-        data:{labels:ymSet,datasets:[
-            {label:'정기 발송',data:bwD, borderColor:C.green, backgroundColor:'rgba(22,163,74,.10)',  fill:true,tension:.4,pointRadius:4,pointBackgroundColor:C.green},
-            {label:'KNX 발송', data:knxD,borderColor:C.blue,  backgroundColor:'rgba(30,115,230,.10)', fill:true,tension:.4,pointRadius:4,pointBackgroundColor:C.blue},
-            {label:'자료요청', data:reqD,borderColor:C.orange,backgroundColor:'rgba(234,88,12,.10)',  fill:true,tension:.4,pointRadius:4,pointBackgroundColor:C.orange},
-        ]},
-        options:lineOpts()
-    });
-}
-
-function updateDataStatus() {
-    const knxOk=state.knx.raw.length>0, reqOk=state.req.raw.length>0;
-    const dot=document.querySelector('.status-dot'), text=document.getElementById('dataStatus');
-    if (knxOk&&reqOk) {
-        dot.className='status-dot loaded';
-        text.innerHTML=`<span class="status-dot loaded"></span> KNX ${state.knx.raw.length}건 · 요청서 ${state.req.raw.length}건`;
-    } else if (knxOk||reqOk) {
-        dot.className='status-dot partial';
-        text.innerHTML=`<span class="status-dot partial"></span> 일부 로드됨`;
+        data: { labels: months12, datasets: [
+          { label: '예건', data: yeMonths, backgroundColor: PALETTE[0], borderRadius: 4 },
+          { label: '종건', data: jgMonths, backgroundColor: PALETTE[2], borderRadius: 4 }
+        ] },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: true } }, scales: { y: { beginAtZero: true } } }
+      });
     }
-}
 
-/* =====================================================
-   외부 데이터 로드 (data/knx.js, data/req.js)
-   convert.exe 실행 후 생성된 전역변수 사용
-   ===================================================== */
-function loadExternalData() {
-    // ── KNX 데이터 ──────────────────────────────────────
-    const knxRaw = window.KNX_DATA || [];
-    state.knx.raw = knxRaw.filter(r => {
-        // 방어: y/m 유효성 확인
-        return r && r.date && r.y >= 2020 && r.y <= 2050
-            && r.m >= 1 && r.m <= 12
-            && Array.isArray(r.items) && r.items.length === 9;
-    });
-    // itemSum 재계산 (누락 방어)
-    state.knx.raw.forEach(r => {
-        r.itemSum = r.items.reduce((s, v) => s + (v || 0), 0);
-    });
+    // 상단 "데이터 입력" 탭 미니 KPI도 동일 값으로 동기화 (2주 정기발송 수동 입력 폼은 HGC_DATA로 대체됨)
+    setText('up_bw_total', fmt(complete.length));
+    setText('up_bw_sogyeon', fmt(sogyeonRows.length));
+    setText('up_bw_noesim', fmt(noesimRows.length));
+    setText('up_bw_month', dateRangeText);
+    relabelKpi('up_bw_month', '최근 발송 데이터');
 
-    const knxOk = state.knx.raw.length > 0;
-    setEl('sheet1Count',  state.knx.raw.length + '건');
-    setEl('sheet1Status', knxOk ? '로드 완료 ✓' : 'data/knx.js 없음');
-    const s1 = document.getElementById('sheetResult1');
-    if(s1) s1.classList.toggle('loaded', knxOk);
+    renderBiweeklyList(filtered);
+  }
 
-    // ── REQ 데이터 ──────────────────────────────────────
-    const reqRaw = window.REQ_DATA || [];
-    state.req.raw = reqRaw.filter(r => {
-        return r && r.date && r.y >= 2020 && r.y <= 2050
-            && r.m >= 1 && r.m <= 12
-            && Array.isArray(r.items) && r.items.length === 9;
-    });
-    state.req.raw.forEach(r => {
-        r.itemSum = r.items.reduce((s, v) => s + (v || 0), 0);
-    });
+  // ============================================================
+  // 6. 섹션 B/C 공용 렌더러 (KNX, 자료요청 구조 동일)
+  // ============================================================
+  function renderKpiSection(prefix, rawData, memoField) {
+    const arr = applyFilter(rawData);
+    const thisMonth = arr.filter(d => d.y === CURRENT_YEAR && d.m === CURRENT_MONTH);
 
-    const reqOk = state.req.raw.length > 0;
-    setEl('sheet2Count',  state.req.raw.length + '건');
-    setEl('sheet2Status', reqOk ? '로드 완료 ✓' : 'data/req.js 없음');
-    const s2 = document.getElementById('sheetResult2');
-    if(s2) s2.classList.toggle('loaded', reqOk);
+    setText(`v_${prefix}_total`, fmt(arr.length));
+    setText(`v_${prefix}_month`, fmt(thisMonth.length));
+    setText(`v_${prefix}_clients`, fmt(new Set(arr.map(d => d.group)).size));
+    setText(`v_${prefix}_items`, fmt(arr.reduce((s, d) => s + (Number(d.itemSum) || 0), 0)));
 
-    console.log(`[DATA] KNX ${state.knx.raw.length}건, REQ ${state.req.raw.length}건 로드`);
+    const months = monthlyCounts(arr);
+    barChart(`v_${prefix}MonthlyChart`, `${prefix}Monthly`,
+      ['1월','2월','3월','4월','5월','6월','7월','8월','9월','10월','11월','12월'], months, PALETTE[0]);
 
-    updateVisYearFilterButtons();
-    applyVisFilters();
-    renderUploadKnxTable();
-    renderUploadReqTable();
-}
+    const groups = topNGroups(arr, 'group', 10);
+    barChart(`v_${prefix}GroupChart`, `${prefix}Group`, groups.map(g => g[0]), groups.map(g => g[1]), PALETTE[4], true);
 
-/* =====================================================
-   데이터 입력 탭 — 업로드 테이블
-   ===================================================== */
-function initSearches() {
-    document.getElementById('knxSearch').addEventListener('input', e=>{ state.knx.search=e.target.value.toLowerCase(); state.knx.page=1; renderUploadKnxTable(); });
-    document.getElementById('reqSearch').addEventListener('input', e=>{ state.req.search=e.target.value.toLowerCase(); state.req.page=1; renderUploadReqTable(); });
-}
+    const items = sumItems(arr, 9);
+    barChart(`v_${prefix}ItemChart`, `${prefix}Item`, ITEM_LABELS, items, PALETTE[2]);
 
-function renderUploadKnxTable() {
-    let data=[...state.knx.raw].sort((a,b)=>b.date.localeCompare(a.date));
-    if(state.knx.search){const q=state.knx.search; data=data.filter(r=>r.date.includes(q)||(r.workplace||'').toLowerCase().includes(q)||(r.group||'').toLowerCase().includes(q)||(r.staff||'').toLowerCase().includes(q)||(r.memo||'').toLowerCase().includes(q));}
-    setEl('knxRowCount', data.length.toLocaleString()+'건');
-    const total=Math.ceil(data.length/PAGE)||1;
-    const page=data.slice((state.knx.page-1)*PAGE, state.knx.page*PAGE);
-    const tbody=document.getElementById('knxTableBody');
-    if(!page.length){ tbody.innerHTML=`<tr><td colspan="17"><div class="empty-state sm"><i class="fas fa-file-upload"></i><p>엑셀을 업로드해 주세요</p></div></td></tr>`; }
-    else {
-        tbody.innerHTML=page.map(r=>`<tr>
-            <td style="font-family:var(--mono);color:var(--blue)">${r.date}</td>
-            <td>${jongYeBadge(r.jongYe)}</td>
-            <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis" title="${r.workplace}">${r.workplace||'-'}</td>
-            <td>${r.group||'-'}</td>
-            ${r.items.map(v=>ck(v)).map(s=>`<td style="text-align:center">${s}</td>`).join('')}
-            <td style="font-family:var(--mono);text-align:center;color:var(--teal)">${r.itemSum}</td>
-            <td>${provBadge(r.provType)}</td>
-            <td style="color:var(--purple)">${r.staff||'-'}</td>
-            <td style="color:var(--sub);max-width:120px;overflow:hidden;text-overflow:ellipsis" title="${r.memo}">${r.memo||'-'}</td>
-        </tr>`).join('');
+    const memoTop = tokenizeTop(arr, memoField, 10);
+    barChart(`v_${prefix}MemoChart`, `${prefix}Memo`, memoTop.map(m => m[0]), memoTop.map(m => m[1]), PALETTE[3], true);
+  }
+
+  // ============================================================
+  // 7. 섹션 D: 종합 비교 (정기/KNX/자료요청 월별 통합)
+  // ============================================================
+  function renderCombined() {
+    const knxArr = applyFilter(knxData);
+    const reqArr = applyFilter(reqData);
+    const hgcComplete = applyHgcFilter(hgcData).filter(d => d.status === 'complete');
+    const hgcMonths = Array(12).fill(0);
+    hgcComplete.forEach(d => { const mo = Number(((d.periodStart || '') + '').split('-')[1]); if (mo >= 1 && mo <= 12) hgcMonths[mo - 1]++; });
+
+    lineChart('v_combinedChart', 'combined',
+      ['1월','2월','3월','4월','5월','6월','7월','8월','9월','10월','11월','12월'],
+      [
+        { label: '정기 발송', data: hgcMonths, borderColor: PALETTE[1], backgroundColor: PALETTE[1] },
+        { label: 'KNX', data: monthlyCounts(knxArr), borderColor: PALETTE[0], backgroundColor: PALETTE[0] },
+        { label: '자료요청', data: monthlyCounts(reqArr), borderColor: PALETTE[2], backgroundColor: PALETTE[2] }
+      ]);
+  }
+
+  // ============================================================
+  // 8. 데이터 입력 탭 - KNX/자료요청 상세 테이블 (검색 + 페이지네이션)
+  // ============================================================
+  const tableState = {
+    knx: { page: 1, size: 20, q: '' },
+    req: { page: 1, size: 20, q: '' }
+  };
+
+  function knxRowHTML(d) {
+    const items = d.items || [];
+    return `<tr>
+      <td>${d.date || '-'}</td><td>${d.jongYe || '-'}</td><td>${d.workplace || '-'}</td><td>${d.group || '-'}</td>
+      ${ITEM_LABELS.map((_, i) => `<td>${items[i] || 0}</td>`).join('')}
+      <td><strong>${d.itemSum || 0}</strong></td><td>${d.provType || '-'}</td><td>${d.staff || '-'}</td><td>${d.memo || ''}</td>
+    </tr>`;
+  }
+  function reqRowHTML(d) {
+    const items = d.items || [];
+    return `<tr>
+      <td>${d.date || '-'}</td><td>${d.jongYe || '-'}</td><td>${d.workplace || '-'}</td><td>${d.group || '-'}</td>
+      ${ITEM_LABELS.map((_, i) => `<td>${items[i] || 0}</td>`).join('')}
+      <td><strong>${d.itemSum || 0}</strong></td><td>${d.sender || '-'}</td><td>${d.note || ''}</td>
+    </tr>`;
+  }
+
+  function filterBySearch(arr, q) {
+    if (!q) return arr;
+    const s = q.toLowerCase();
+    return arr.filter(d => [d.workplace, d.group, d.staff, d.sender, d.memo, d.note]
+      .some(v => v && String(v).toLowerCase().includes(s)));
+  }
+
+  function renderDetailTable(type) {
+    const raw = type === 'knx' ? knxData : reqData;
+    const st = tableState[type];
+    const filtered = filterBySearch(raw, st.q).slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    const totalPages = Math.max(1, Math.ceil(filtered.length / st.size));
+    st.page = Math.min(st.page, totalPages);
+    const pageItems = filtered.slice((st.page - 1) * st.size, st.page * st.size);
+
+    const tbody = $(`${type}TableBody`);
+    const colCount = type === 'knx' ? 17 : 16;
+    if (tbody) {
+      tbody.innerHTML = pageItems.length
+        ? pageItems.map(type === 'knx' ? knxRowHTML : reqRowHTML).join('')
+        : `<tr><td colspan="${colCount}"><div class="empty-state sm"><i class="fas fa-search"></i><p>결과 없음</p></div></td></tr>`;
     }
-    renderPagination('knxPagination', total, state.knx.page, p=>{ state.knx.page=p; renderUploadKnxTable(); });
-}
+    setText(`${type}RowCount`, `${fmt(filtered.length)}건`);
+    renderPagination(`${type}Pagination`, st.page, totalPages, (p) => { st.page = p; renderDetailTable(type); });
+  }
 
-function renderUploadReqTable() {
-    let data=[...state.req.raw].sort((a,b)=>b.date.localeCompare(a.date));
-    if(state.req.search){const q=state.req.search; data=data.filter(r=>r.date.includes(q)||(r.workplace||'').toLowerCase().includes(q)||(r.group||'').toLowerCase().includes(q)||(r.sender||'').toLowerCase().includes(q)||(r.note||'').toLowerCase().includes(q));}
-    setEl('reqRowCount', data.length.toLocaleString()+'건');
-    const total=Math.ceil(data.length/PAGE)||1;
-    const page=data.slice((state.req.page-1)*PAGE, state.req.page*PAGE);
-    const tbody=document.getElementById('reqTableBody');
-    if(!page.length){ tbody.innerHTML=`<tr><td colspan="16"><div class="empty-state sm"><i class="fas fa-file-upload"></i><p>엑셀을 업로드해 주세요</p></div></td></tr>`; }
-    else {
-        tbody.innerHTML=page.map(r=>`<tr>
-            <td style="font-family:var(--mono);color:var(--blue)">${r.date}</td>
-            <td>${jongYeBadge(r.jongYe)}</td>
-            <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis" title="${r.workplace}">${r.workplace||'-'}</td>
-            <td>${r.group||'-'}</td>
-            ${r.items.map(v=>ck(v)).map(s=>`<td style="text-align:center">${s}</td>`).join('')}
-            <td style="font-family:var(--mono);text-align:center;color:var(--teal)">${r.itemSum}</td>
-            <td style="color:var(--purple)">${r.sender||'-'}</td>
-            <td style="color:var(--sub);max-width:120px;overflow:hidden;text-overflow:ellipsis" title="${r.note}">${r.note||'-'}</td>
-        </tr>`).join('');
+  function renderPagination(containerId, page, totalPages, onGo) {
+    const box = $(containerId); if (!box) return;
+    if (totalPages <= 1) { box.innerHTML = ''; return; }
+    let html = '';
+    const mk = (p, label, active, disabled) =>
+      `<button class="page-btn${active ? ' active' : ''}" ${disabled ? 'disabled' : ''} data-page="${p}">${label}</button>`;
+    html += mk(page - 1, '‹', false, page <= 1);
+    const start = Math.max(1, page - 2), end = Math.min(totalPages, page + 2);
+    for (let p = start; p <= end; p++) html += mk(p, p, p === page, false);
+    html += mk(page + 1, '›', false, page >= totalPages);
+    box.innerHTML = html;
+    box.querySelectorAll('.page-btn').forEach(btn => {
+      btn.addEventListener('click', () => { if (!btn.disabled) onGo(Number(btn.dataset.page)); });
+    });
+  }
+
+  function initDetailTables() {
+    ['knx', 'req'].forEach(type => {
+      const search = $(`${type}Search`);
+      if (search) search.addEventListener('input', () => {
+        tableState[type].q = search.value.trim(); tableState[type].page = 1; renderDetailTable(type);
+      });
+      renderDetailTable(type);
+    });
+  }
+
+  // ============================================================
+  // 9. 데이터 입력 탭 - 정기 발송 목록(HGC_DATA 표시, 입력폼은 비활성화)
+  // ============================================================
+  // DOM 구조 변경(폼 숨김, 표 헤더 교체)은 최초 1회만 수행
+  function initBiweeklySection() {
+    const form = $('biweeklyForm');
+    if (form) {
+      form.style.display = 'none';
+      const note = document.createElement('div');
+      note.className = 'empty-state sm';
+      note.innerHTML = '<i class="fas fa-info-circle"></i><p>정기 전송 데이터는 이제 HGC 데이터로 자동 집계됩니다.</p>';
+      form.parentNode.insertBefore(note, form);
     }
-    renderPagination('reqPagination', total, state.req.page, p=>{ state.req.page=p; renderUploadReqTable(); });
-}
+    const tbody = $('biweeklyTableBody');
+    const theadRow = tbody && tbody.closest('table') ? tbody.closest('table').querySelector('thead tr') : null;
+    if (theadRow) {
+      theadRow.innerHTML = '<th>발송항목</th><th>대상기간</th><th>대상 사업장</th><th>진행상태</th>';
+    }
+  }
 
-/* =====================================================
-   데이터 입력 탭 — 정기 발송 폼
-   ===================================================== */
-function initBiweeklyForm() {
-    document.querySelectorAll('.quick-btn').forEach(btn=>btn.addEventListener('click',()=>setQuickPeriod(btn.dataset.period)));
-    document.querySelectorAll('.count-btn').forEach(btn=>{
-        btn.addEventListener('click',()=>{
-            const id=btn.dataset.target; const input=document.getElementById(id);
-            let v=parseInt(input.value)||0;
-            if(btn.classList.contains('plus')) v=Math.max(0,v+1);
-            if(btn.classList.contains('minus')) v=Math.max(0,v-1);
-            input.value=v; updateCountTotal();
+  // 필터 변경 시마다 재호출 - R 엑셀 리포트와 동일한 형식(기간별 시트 → 카테고리별 1행)
+  function renderBiweeklyList(filtered) {
+    const sheets = buildHgcReportSheets(filtered);
+    const tbody = $('biweeklyTableBody');
+    let rowCount = 0;
+    if (tbody) {
+      let html = '';
+      sheets.forEach(sheet => {
+        sheet.rows.forEach((r, i) => {
+          rowCount++;
+          const color = r.statusText === '발송완료' ? 'var(--green,#22c55e)'
+            : r.statusText === '발송예정' ? 'var(--orange,#f97316)' : 'var(--muted,#888)';
+          // 시트(기간)가 바뀌는 첫 행에 구분선을 넣어 시트 단위를 시각적으로 구분
+          const dividerStyle = i === 0 ? ' style="border-top:2px solid var(--border,#ddd)"' : '';
+          html += `<tr${dividerStyle}>
+            <td>${r.category}</td>
+            <td>${r.periodText}</td>
+            <td>${r.workplaceText}</td>
+            <td><span style="color:${color}">${r.statusText}</span></td>
+          </tr>`;
         });
-    });
-    document.getElementById('jongCount').addEventListener('input', updateCountTotal);
-    document.getElementById('yeCount').addEventListener('input', updateCountTotal);
-    document.getElementById('biweeklyForm').addEventListener('submit', e=>{ e.preventDefault(); saveBiweekly(); });
-    document.getElementById('clearFormBtn').addEventListener('click', clearBwForm);
-    document.getElementById('upBwYearFilter').addEventListener('click', e=>{
-        const btn=e.target.closest('.filter-btn'); if(!btn) return;
-        toggleActive(document.getElementById('upBwYearFilter'), btn);
-        renderBwTable(btn.dataset.year==='all'?'all':parseInt(btn.dataset.year));
-    });
-    // 삭제 모달
-    document.getElementById('cancelDelete').addEventListener('click',()=>document.getElementById('deleteModal').style.display='none');
-    document.getElementById('confirmDelete').addEventListener('click', ()=>{
-        if(!deleteTargetId) return;
-        lsDelete(deleteTargetTable, deleteTargetId);
-        document.getElementById('deleteModal').style.display='none';
-        showToast('삭제되었습니다.');
-        if(deleteTargetTable===API_BW) loadBiweeklyData();
-        else loadEtcData();
-    });
-    document.getElementById('sendDate').value=new Date().toISOString().split('T')[0];
-}
+      });
+      tbody.innerHTML = html || '<tr><td colspan="4"><div class="empty-state sm"><i class="fas fa-inbox"></i><p>데이터 없음</p></div></td></tr>';
+    }
+    setText('bwRowCount', `${fmt(rowCount)}건`);
+  }
 
-function setQuickPeriod(period) {
-    const now=new Date(),y=now.getFullYear(),m=now.getMonth();
-    let s,e;
-    if(period==='first')         {s=new Date(y,m,2);   e=new Date(y,m,16);}
-    else if(period==='second')   {s=new Date(y,m,17);  e=new Date(y,m+1,1);}
-    else if(period==='prev-first'){s=new Date(y,m-1,2); e=new Date(y,m-1,16);}
-    else                          {s=new Date(y,m-1,17);e=new Date(y,m,1);}
-    document.getElementById('periodStart').value=s.toISOString().split('T')[0];
-    document.getElementById('periodEnd').value  =e.toISOString().split('T')[0];
-}
-function updateCountTotal() {
-    const j=parseInt(document.getElementById('jongCount').value)||0;
-    const y=parseInt(document.getElementById('yeCount').value)||0;
-    setEl('totalCount',(j+y).toLocaleString());
-}
-function clearBwForm() {
-    document.querySelectorAll('input[name=report_type]')[0].checked=true;
-    document.getElementById('periodStart').value='';
-    document.getElementById('periodEnd').value='';
-    document.getElementById('sendDate').value=new Date().toISOString().split('T')[0];
-    document.getElementById('jongCount').value='0';
-    document.getElementById('yeCount').value='0';
-    document.getElementById('reportNote').value='';
-    updateCountTotal();
-}
-function saveBiweekly() {
-    const rtype    = document.querySelector('input[name=report_type]:checked').value;
-    const pStart   = document.getElementById('periodStart').value;
-    const pEnd     = document.getElementById('periodEnd').value;
-    const sendDate = document.getElementById('sendDate').value;
-    const jongCount= parseInt(document.getElementById('jongCount').value)||0;
-    const yeCount  = parseInt(document.getElementById('yeCount').value)||0;
-    const note     = document.getElementById('reportNote').value.trim();
-    if(!pStart||!pEnd||!sendDate){showToast('대상기간과 발송일을 입력해 주세요.','error');return;}
-    const record = {
-        id: lsUUID(),
-        report_type: rtype,
-        period_start: pStart, period_end: pEnd,
-        send_date: sendDate,
-        jong_count: jongCount, ye_count: yeCount,
-        note,
-        created_at: Date.now()
-    };
-    lsSave(API_BW, record);
-    showToast('저장되었습니다.');
-    clearBwForm();
-    loadBiweeklyData();
-}
-function loadBiweeklyData() {
-    state.bw.records = lsLoad(API_BW).sort((a,b)=>(b.send_date||'').localeCompare(a.send_date||''));
-    const years=[...new Set(state.bw.records.map(r=>r.send_date?.substring(0,4)).filter(Boolean))].sort();
-    const yf=document.getElementById('upBwYearFilter');
-    const curAct=yf.querySelector('.filter-btn.active')?.dataset.year||'all';
-    yf.innerHTML='<button class="filter-btn" data-year="all">전체</button>';
-    years.forEach(y=>{const b=document.createElement('button');b.className='filter-btn';b.dataset.year=y;b.textContent=y+'년';yf.appendChild(b);});
-    yf.querySelectorAll('.filter-btn').forEach(b=>b.classList.toggle('active',b.dataset.year===String(curAct)));
-    const curY=String(new Date().getFullYear()), curM=new Date().getMonth()+1;
-    const all=state.bw.records.filter(r=>r.send_date?.startsWith(curY));
-    setEl('up_bw_total',   all.length);
-    setEl('up_bw_sogyeon', all.filter(r=>r.report_type==='사후관리 소견서').length);
-    setEl('up_bw_noesim',  all.filter(r=>r.report_type==='뇌심·직무').length);
-    setEl('up_bw_month',   state.bw.records.filter(r=>r.send_date?.startsWith(curY+'-'+pad(curM))).length);
-    updateVisYearFilterButtons();
-    applyVisFilters();
-    renderBwTable('all');
-}
-function renderBwTable(yearFilter='all') {
-    let data=state.bw.records.filter(r=>yearFilter==='all'||r.send_date?.startsWith(String(yearFilter)));
-    setEl('bwRowCount',data.length+'건');
-    const tbody=document.getElementById('biweeklyTableBody');
-    if(!data.length){tbody.innerHTML=`<tr><td colspan="8"><div class="empty-state sm"><i class="fas fa-plus-circle"></i><p>폼으로 입력해 주세요</p></div></td></tr>`;return;}
-    tbody.innerHTML=data.map(r=>{
-        const total=(r.jong_count||0)+(r.ye_count||0);
-        const badge=r.report_type==='사후관리 소견서'?'<span class="badge b-sogyeon">사후관리 소견서</span>':'<span class="badge b-noesim">뇌심·직무</span>';
-        const period=r.period_start&&r.period_end?`${r.period_start.substring(5)} ~ ${r.period_end.substring(5)}`:'-';
-        return `<tr>
-            <td style="font-family:var(--mono);color:var(--blue)">${r.send_date||'-'}</td>
-            <td>${badge}</td><td>${period}</td>
-            <td style="font-family:var(--mono);text-align:center;color:var(--green)">${r.jong_count||0}</td>
-            <td style="font-family:var(--mono);text-align:center;color:var(--blue)">${r.ye_count||0}</td>
-            <td style="font-family:var(--mono);text-align:center;color:var(--teal);font-weight:700">${total}</td>
-            <td style="color:var(--sub);max-width:120px;overflow:hidden;text-overflow:ellipsis" title="${r.note||''}">${r.note||'-'}</td>
-            <td><button class="act-btn act-delete" data-id="${r.id}" data-table="${API_BW}"><i class="fas fa-trash"></i></button></td>
-        </tr>`;
-    }).join('');
-    tbody.querySelectorAll('.act-delete').forEach(btn=>btn.addEventListener('click',()=>{
-        deleteTargetId=btn.dataset.id; deleteTargetTable=btn.dataset.table;
-        document.getElementById('deleteModal').style.display='flex';
-    }));
-}
+  // ============================================================
+  // 10. 기타 업무 탭 (비만/SWI/옴부즈만) - 직접 입력 + JSON 내보내기/가져오기
+  // ============================================================
+  function etcMonthly(arr) {
+    const m = Array(12).fill(0);
+    arr.forEach(d => { if (d.m >= 1 && d.m <= 12) m[d.m - 1] += (Number(d.count) || 0); });
+    return m;
+  }
 
-/* =====================================================
-   기타 업무 탭 (비만 / SWI / 옴부즈만)
-   ===================================================== */
-const ETC_CONFIG = {
-    biman: { label:'비만 관리', color:C.blue,   chartColor:'rgba(0,217,255,0.7)' },
-    swi:   { label:'SWI',       color:C.green,  chartColor:'rgba(0,255,163,0.7)' },
-    ombu:  { label:'옴부즈만',  color:C.purple, chartColor:'rgba(167,139,250,0.7)' },
-};
+  function renderEtc(key) {
+    const arr = etcData[key];
+    const tbody = $(`${key}TableBody`);
+    if (tbody) {
+      tbody.innerHTML = arr.length ? arr.slice().sort((a, b) => (b.date || '').localeCompare(a.date || '')).map(d => `
+        <tr>
+          <td>${d.date}</td><td>${d.workplace || '-'}</td><td>${d.jongYe || '-'}</td><td>${d.count}</td><td>${d.note || ''}</td>
+          <td><button class="btn-icon danger" data-del="${key}:${d.id}"><i class="fas fa-trash-alt"></i></button></td>
+        </tr>`).join('') : '<tr><td colspan="6"><div class="empty-state sm"><i class="fas fa-plus-circle"></i><p>입력해 주세요</p></div></td></tr>';
+    }
+    const total = arr.reduce((s, d) => s + (Number(d.count) || 0), 0);
+    setText(`${key}RowCount`, `${fmt(arr.length)}건`);
+    setText(`etc_${key}_total_inline`, `${fmt(total)}건`);
+    setText(`etc_kpi_${key}`, fmt(total));
+    barChart(`${key}Chart`, `${key}Chart`, ['1월','2월','3월','4월','5월','6월','7월','8월','9월','10월','11월','12월'], etcMonthly(arr), PALETTE[5]);
+  }
 
-function initEtcForms() {
-    const today = new Date().toISOString().split('T')[0];
-    ['biman','swi','ombu'].forEach(type=>{
-        const form = document.getElementById(`${type}Form`);
-        // 날짜 초기값 = 오늘
-        const dateInput = form.querySelector('[name=date]');
-        if(dateInput) dateInput.value = today;
-        form.addEventListener('submit', e=>{
-            e.preventDefault();
-            saveEtcRecord(type, e.target);
+  function addEtcToolbar(key) {
+    const header = document.querySelector(`#${key}TableBody`)?.closest('.etc-table-wrap')?.querySelector('.etc-table-header');
+    if (!header || header.querySelector('.etc-io-btns')) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'etc-io-btns';
+    wrap.style.cssText = 'display:flex;gap:6px;margin-left:auto;';
+    wrap.innerHTML = `
+      <button type="button" class="btn-secondary sm-btn" data-io="export" data-key="${key}"><i class="fas fa-download"></i> 내보내기</button>
+      <label class="btn-secondary sm-btn" style="cursor:pointer;margin:0">
+        <i class="fas fa-upload"></i> 가져오기
+        <input type="file" accept="application/json" data-io="import" data-key="${key}" style="display:none">
+      </label>`;
+    header.appendChild(wrap);
+
+    wrap.querySelector('[data-io="export"]').addEventListener('click', () => {
+      downloadJSON(`${key}_${todayStamp()}.json`, etcData[key]);
+    });
+    wrap.querySelector('[data-io="import"]').addEventListener('change', (e) => {
+      const file = e.target.files[0]; if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const imported = JSON.parse(reader.result);
+          if (Array.isArray(imported)) {
+            const existingIds = new Set(etcData[key].map(d => d.id));
+            imported.forEach(d => { if (!existingIds.has(d.id)) etcData[key].push(d); });
+            renderEtc(key);
+          }
+        } catch (err) { alert('JSON 형식을 읽을 수 없습니다.'); }
+      };
+      reader.readAsText(file);
+      e.target.value = '';
+    });
+  }
+
+  function todayStamp() { return new Date().toISOString().slice(0, 10).replace(/-/g, ''); }
+
+  function initEtcForms() {
+    ETC_TYPES.forEach(({ key }) => {
+      addEtcToolbar(key);
+      const form = $(`${key}Form`);
+      if (form) {
+        form.addEventListener('submit', (e) => {
+          e.preventDefault();
+          const fd = new FormData(form);
+          const date = fd.get('date');
+          if (!date) return;
+          const [y, m, d] = date.split('-').map(Number);
+          etcData[key].push({
+            id: `${key}_${Date.now()}`,
+            date, y, m, d,
+            workplace: fd.get('workplace') || '',
+            jongYe: fd.get('jongye') || '',
+            count: Number(fd.get('count')) || 1,
+            note: fd.get('note') || ''
+          });
+          form.reset();
+          renderEtc(key);
         });
+      }
+      renderEtc(key);
     });
-}
 
-function saveEtcRecord(type, form) {
-    const date      = form.querySelector('[name=date]').value;
-    const workplace = form.querySelector('[name=workplace]').value.trim();
-    const jongye    = form.querySelector('[name=jongye]').value;
-    const count     = parseInt(form.querySelector('[name=count]').value)||1;
-    const note      = form.querySelector('[name=note]').value.trim();
-    if(!date){showToast('날짜를 입력해 주세요.','error');return;}
-    const record = { id:lsUUID(), work_type:type, date, workplace, jongye, count, note, created_at:Date.now() };
-    lsSave(API_ETC, record);
-    showToast('추가되었습니다.');
-    form.querySelector('[name=date]').value=new Date().toISOString().split('T')[0];
-    form.querySelector('[name=workplace]').value='';
-    form.querySelector('[name=jongye]').value='';
-    form.querySelector('[name=count]').value='1';
-    form.querySelector('[name=note]').value='';
-    loadEtcData();
-}
-
-function loadEtcData() {
-    const all = lsLoad(API_ETC).sort((a,b)=>(b.date||'').localeCompare(a.date||''));
-    state.etc.biman = all.filter(r=>r.work_type==='biman');
-    state.etc.swi   = all.filter(r=>r.work_type==='swi');
-    state.etc.ombu  = all.filter(r=>r.work_type==='ombu');
-    renderEtcAll();
-}
-
-function renderEtcAll() {
-    const curY=String(new Date().getFullYear());
-    ['biman','swi','ombu'].forEach(type=>{
-        const data=state.etc[type];
-        const yearData=data.filter(r=>r.date?.startsWith(curY));
-        const totalCount=yearData.reduce((s,r)=>s+(r.count||0),0);
-        // 상단 KPI
-        setEl(`etc_kpi_${type}`, totalCount+'건');
-        setEl(`etc_${type}_total_inline`, totalCount+'건');
-        setEl(`${type}RowCount`, data.length+'건');
-        renderEtcTable(type, data);
-        renderEtcChart(type, data, curY);
+    // 삭제 버튼(테이블 내) 위임 처리
+    document.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-del]');
+      if (!btn) return;
+      const [type, id] = btn.dataset.del.split(':');
+      pendingDelete = { type, id };
+      const modal = $('deleteModal');
+      if (modal) modal.style.display = 'flex';
     });
-}
+  }
 
-function renderEtcTable(type, data) {
-    const tbody=document.getElementById(`${type}TableBody`);
-    if(!data.length){tbody.innerHTML=`<tr><td colspan="6"><div class="empty-state sm"><i class="fas fa-plus-circle"></i><p>입력해 주세요</p></div></td></tr>`;return;}
-    tbody.innerHTML=data.slice(0,30).map(r=>`<tr>
-        <td style="font-family:var(--mono);color:var(--blue)">${r.date||'-'}</td>
-        <td style="max-width:100px;overflow:hidden;text-overflow:ellipsis">${r.workplace||'-'}</td>
-        <td>${r.jongye?jongYeBadge(r.jongye):'<span class="badge b-etc">-</span>'}</td>
-        <td style="font-family:var(--mono);text-align:center;color:var(--teal);font-weight:700">${r.count||1}</td>
-        <td style="color:var(--sub);max-width:100px;overflow:hidden;text-overflow:ellipsis" title="${r.note||''}">${r.note||'-'}</td>
-        <td><button class="act-btn act-delete" data-id="${r.id}" data-table="${API_ETC}"><i class="fas fa-trash"></i></button></td>
-    </tr>`).join('');
-    tbody.querySelectorAll('.act-delete').forEach(btn=>btn.addEventListener('click',()=>{
-        deleteTargetId=btn.dataset.id; deleteTargetTable=btn.dataset.table;
-        document.getElementById('deleteModal').style.display='flex';
-    }));
-}
-
-function renderEtcChart(type, data, curY) {
-    const months=Array.from({length:12},(_,i)=>`${i+1}월`);
-    const mC=Array(12).fill(0);
-    data.filter(r=>r.date?.startsWith(curY)).forEach(r=>{
-        const m=parseInt(r.date?.substring(5,7)||'')-1;
-        if(!isNaN(m)&&m>=0&&m<12) mC[m]+=(r.count||1);
+  function initDeleteModal() {
+    const modal = $('deleteModal');
+    $('cancelDelete')?.addEventListener('click', () => { pendingDelete = null; if (modal) modal.style.display = 'none'; });
+    $('confirmDelete')?.addEventListener('click', () => {
+      if (pendingDelete) {
+        const { type, id } = pendingDelete;
+        etcData[type] = etcData[type].filter(d => d.id !== id);
+        renderEtc(type);
+      }
+      pendingDelete = null;
+      if (modal) modal.style.display = 'none';
     });
-    const cfg=ETC_CONFIG[type];
-    destroyChart(`etc_${type}`);
-    CH[`etc_${type}`]=safeChart(`${type}Chart`,{
-        type:'bar',
-        data:{labels:months,datasets:[{label:cfg.label,data:mC,backgroundColor:cfg.chartColor,borderRadius:4}]},
-        options:{...barOpts(),plugins:{...barOpts().plugins,legend:{display:false}}}
-    });
-}
+  }
 
-/* =====================================================
-   공통 페이지네이션
-   ===================================================== */
-function renderPagination(cid, total, current, onPage) {
-    const c=document.getElementById(cid);
-    if(total<=1){c.innerHTML='';return;}
-    const s=Math.max(1,current-3), e=Math.min(total,current+3);
-    let h='';
-    if(current>1) h+=`<button class="page-btn" data-p="${current-1}">‹</button>`;
-    for(let p=s;p<=e;p++) h+=`<button class="page-btn${p===current?' active':''}" data-p="${p}">${p}</button>`;
-    if(current<total) h+=`<button class="page-btn" data-p="${current+1}">›</button>`;
-    c.innerHTML=h;
-    c.querySelectorAll('.page-btn').forEach(btn=>btn.addEventListener('click',()=>onPage(parseInt(btn.dataset.p))));
-}
+  // ============================================================
+  // 11. 전체 렌더 (필터 변경 시 재호출)
+  // ============================================================
+  function renderAll() {
+    renderSectionA();
+    renderKpiSection('knx', knxData, 'memo');
+    renderKpiSection('req', reqData, 'note');
+    renderCombined();
+  }
+
+  // ============================================================
+  // 12. 초기화
+  // ============================================================
+  document.addEventListener('DOMContentLoaded', () => {
+    initTabs();
+    initHeaderStatus();
+    initFilters();
+    initBiweeklySection();
+    initDetailTables();
+    initEtcForms();
+    initDeleteModal();
+    renderAll();
+  });
+})();
