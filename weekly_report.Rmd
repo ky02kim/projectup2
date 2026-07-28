@@ -1,0 +1,410 @@
+---
+title: "주간 업무 실적 보고서"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    code_folding: hide
+params:
+  req_path: "data/req.js"     # window.REQ_DATA = [...]; 형태 파일 경로
+  knx_path: "data/knx.js"     # window.KNX_DATA = [...]; 형태 파일 경로
+  hgc_path: "data/hgc.js"     # window.HGC_DATA = [...]; 형태 파일 경로 (data/hgc.js)
+  report_year: 2026
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+library(jsonlite)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(stringr)
+library(lubridate)
+library(ggplot2)
+library(kableExtra)
+
+`%||%` <- function(a, b) if (is.null(a)) b else a
+```
+
+```{r common-functions}
+# ── window.XXX_DATA = [...]; 형태의 JS 파일에서 JSON 배열만 추출해서 파싱 ──
+read_js_json <- function(path) {
+  if (!file.exists(path)) {
+    warning(sprintf("파일을 찾을 수 없습니다: %s", path))
+    return(list())
+  }
+  txt <- paste(readLines(path, warn = FALSE, encoding = "UTF-8"), collapse = "\n")
+  json_txt <- str_replace(txt, "^\\s*(var|let|const)?\\s*window\\.[A-Za-z0-9_]+\\s*=\\s*", "")
+  json_txt <- str_replace(json_txt, ";\\s*$", "")
+  fromJSON(json_txt, simplifyVector = FALSE)
+}
+
+# items 배열을 안전하게 길이 n 벡터로 변환 (없으면 NA로 채움)
+safe_items <- function(items, n) {
+  v <- if (is.null(items)) rep(NA_real_, n) else as.numeric(unlist(items))
+  length(v) <- n
+  v
+}
+
+# 종예건 문자열을 종건/예건/종예건 그룹으로 정규화
+normalize_jongye <- function(x) {
+  case_when(
+    is.na(x) ~ NA_character_,
+    str_detect(x, "종") & str_detect(x, "예") ~ "종예건",
+    str_detect(x, "종") ~ "종건",
+    str_detect(x, "예") ~ "예건",
+    TRUE ~ x
+  )
+}
+```
+
+```{r req-knx-loader}
+# REQ/KNX 공통 아이템 라벨 (필요시 KNX만 따로 지정 가능)
+item_labels <- c("사후세로형","사후가로형","뇌심","직무","정신",
+                  "동의자결과","사업장양식","사이트업로드","통계자료")
+
+records_to_df <- function(records, labels = item_labels) {
+  if (length(records) == 0) {
+    return(tibble(date = character(), y = integer(), m = integer(), d = integer(),
+                   workplace = character(), jongYe = character(), group = character(),
+                   itemSum = numeric(), note = character(), sender = character()))
+  }
+  map_dfr(records, function(r) {
+    items <- safe_items(r$items, length(labels))
+    item_tbl <- as_tibble_row(setNames(as.list(items), labels))
+    tibble(
+      date      = r$date %||% NA_character_,
+      y         = r$y %||% NA_integer_,
+      m         = r$m %||% NA_integer_,
+      d         = r$d %||% NA_integer_,
+      workplace = r$workplace %||% NA_character_,
+      jongYe    = r$jongYe %||% NA_character_,
+      group     = r$group %||% NA_character_,
+      itemSum   = r$itemSum %||% sum(items, na.rm = TRUE),
+      note      = r$note %||% r$memo %||% NA_character_,
+      sender    = r$sender %||% r$staff %||% NA_character_
+    ) |> bind_cols(item_tbl)
+  })
+}
+```
+
+```{r req-knx-summary-functions}
+# 1. 종건/예건/전체 요약
+summarize_jongye <- function(df) {
+  by_group <- df |>
+    mutate(jg = normalize_jongye(jongYe)) |>
+    group_by(구분 = jg) |>
+    summarise(건수 = n(), 발송량 = sum(itemSum, na.rm = TRUE), .groups = "drop")
+  bind_rows(
+    by_group,
+    tibble(구분 = "전체", 건수 = nrow(df), 발송량 = sum(df$itemSum, na.rm = TRUE))
+  )
+}
+
+# 2. 월별 workplace 집계 (wide table: 사업장 x 년-월)
+monthly_workplace <- function(df) {
+  df |>
+    mutate(ym = sprintf("%d-%02d", y, m)) |>
+    count(workplace, ym, name = "건수") |>
+    pivot_wider(names_from = ym, values_from = 건수, values_fill = 0) |>
+    arrange(workplace)
+}
+
+# 3. 올해 workplace 누적 집계
+yearly_workplace <- function(df, yr) {
+  df |>
+    filter(y == yr) |>
+    group_by(workplace) |>
+    summarise(건수 = n(), 발송량 = sum(itemSum, na.rm = TRUE), .groups = "drop") |>
+    arrange(desc(건수))
+}
+
+# 4. TOP10 Workplace 순위
+top10_workplace <- function(df) {
+  df |>
+    count(workplace, sort = TRUE, name = "건수") |>
+    slice_max(건수, n = 10, with_ties = FALSE)
+}
+
+# 5. TOP10 순위 (비고 note 기준, 콤마로 분리한 개별 항목 빈도)
+top10_note <- function(df) {
+  df |>
+    filter(!is.na(note), note != "") |>
+    mutate(note_item = str_split(note, "\\s*,\\s*")) |>
+    unnest(note_item) |>
+    mutate(note_item = str_trim(note_item)) |>
+    filter(note_item != "") |>
+    count(note_item, sort = TRUE, name = "건수") |>
+    slice_max(건수, n = 10, with_ties = FALSE)
+}
+
+# 6. 항목별(items) 건수 합계
+item_totals <- function(df, labels = item_labels) {
+  df |>
+    summarise(across(all_of(labels), ~ sum(.x, na.rm = TRUE))) |>
+    pivot_longer(everything(), names_to = "항목", values_to = "건수") |>
+    arrange(desc(건수))
+}
+
+# 월별 총 발송량 (종합 현황용)
+monthly_total <- function(df, source_name) {
+  df |>
+    group_by(y, m) |>
+    summarise(발송량 = sum(itemSum, na.rm = TRUE), .groups = "drop") |>
+    mutate(source = source_name, ym = sprintf("%d-%02d", y, m))
+}
+```
+
+```{r hgc-functions}
+# HGC 전용 items 라벨 (고정 4개)
+hgc_item_labels <- c("뇌심", "직무", "감정노동", "건진데이터")
+
+hgc_records_to_df <- function(records) {
+  if (length(records) == 0) {
+    return(tibble(status = character(), fileDate = character(), periodStart = character(),
+                   periodEnd = character(), jongYe = character(), workplace = character(),
+                   receive = integer(), report = logical(),
+                   뇌심 = logical(), 직무 = logical(), 감정노동 = logical(), 건진데이터 = logical()))
+  }
+  map_dfr(records, function(r) {
+    raw_items <- r$items %||% as.list(rep(FALSE, 4))
+    items <- unlist(raw_items)
+    length(items) <- 4
+    items[is.na(items)] <- FALSE
+    tibble(
+      status      = r$status %||% NA_character_,
+      fileDate    = r$fileDate %||% NA_character_,
+      periodStart = r$periodStart %||% NA_character_,
+      periodEnd   = r$periodEnd %||% NA_character_,
+      jongYe      = r$jongYe %||% NA_character_,
+      workplace   = r$workplace %||% NA_character_,
+      receive     = r$receive %||% NA_integer_,
+      report      = r$report %||% NA,
+      뇌심        = as.logical(items[1]),
+      직무        = as.logical(items[2]),
+      감정노동    = as.logical(items[3]),
+      건진데이터  = as.logical(items[4])
+    )
+  })
+}
+
+hgc_categories <- list(
+  "사후관리소견서" = function(df) df,
+  "뇌심ㆍ직무"      = function(df) filter(df, 뇌심 | 직무),
+  "뇌심"            = function(df) filter(df, 뇌심),
+  "직무"            = function(df) filter(df, 직무),
+  "감정노동"        = function(df) filter(df, 감정노동),
+  "건진데이터"      = function(df) filter(df, 건진데이터)
+)
+
+fmt_period <- function(start, end) {
+  s <- as.Date(start); e <- as.Date(end)
+  sprintf("%d/%d~%d/%d", month(s), day(s), month(e), day(e))
+}
+
+# 카테고리 1개에 대한 요약 행(1~2행: 종건/예건) 생성
+summarize_hgc_category <- function(df_cat, period_start, period_end) {
+  fallback_period <- fmt_period(period_start, period_end)
+
+  if (nrow(df_cat) == 0) {
+    return(tibble(대상기간 = fallback_period, 대상사업장 = "-", 진행상태 = "-"))
+  }
+
+  period_txt <- fmt_period(min(df_cat$periodStart, na.rm = TRUE),
+                            max(df_cat$periodEnd, na.rm = TRUE))
+  status_txt <- if (any(df_cat$status == "complete", na.rm = TRUE)) "발송완료" else "발송예정"
+
+  rows <- df_cat |>
+    mutate(jg = normalize_jongye(jongYe)) |>
+    group_by(jg) |>
+    summarise(
+      total    = sum(status == "target", na.rm = TRUE),
+      complete = sum(status == "complete", na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    filter(total > 0) |>
+    mutate(대상사업장 = if_else(
+      complete == 0,
+      sprintf("%s %d", jg, total),
+      sprintf("%s %d/%d", jg, complete, total)
+    ))
+
+  if (nrow(rows) == 0) {
+    return(tibble(대상기간 = fallback_period, 대상사업장 = "-", 진행상태 = "-"))
+  }
+
+  tibble(대상기간 = period_txt, 대상사업장 = rows$대상사업장, 진행상태 = status_txt)
+}
+
+# 기간(시트) 하나에 대한 전체 표 생성 (6개 카테고리 블록)
+build_hgc_sheet_table <- function(df_period) {
+  ps <- df_period$periodStart[1]
+  pe <- df_period$periodEnd[1]
+
+  map_dfr(names(hgc_categories), function(cat_name) {
+    df_cat <- hgc_categories[[cat_name]](df_period)
+    res <- summarize_hgc_category(df_cat, ps, pe)
+    res |> mutate(발송항목 = cat_name, .before = 1)
+  })
+}
+
+# kableExtra로 발송항목/대상기간/진행상태 세로 병합해서 출력
+render_hgc_sheet <- function(tbl) {
+  tbl |>
+    select(발송항목, 대상기간, 대상사업장, 진행상태) |>
+    kbl(align = "c") |>
+    kable_styling(bootstrap_options = c("striped", "bordered", "hover"), full_width = TRUE) |>
+    row_spec(0, bold = TRUE, background = "#f2f2f2") |>
+    collapse_rows(columns = c(1, 2, 4), valign = "middle")
+}
+```
+
+```{r load-data}
+req_raw <- read_js_json(params$req_path)
+knx_raw <- read_js_json(params$knx_path)
+hgc_raw <- read_js_json(params$hgc_path)
+
+req_df <- records_to_df(req_raw)
+knx_df <- records_to_df(knx_raw)
+hgc_df <- hgc_records_to_df(hgc_raw)
+```
+
+# 종합 현황
+
+REQ / KNX 월별 발송량을 함께 보는 전체 개요입니다.
+
+```{r overview-chart, fig.width=9, fig.height=4}
+combined_monthly <- bind_rows(
+  monthly_total(req_df, "REQ"),
+  monthly_total(knx_df, "KNX")
+)
+
+if (nrow(combined_monthly) > 0) {
+  ggplot(combined_monthly, aes(x = ym, y = 발송량, fill = source)) +
+    geom_col(position = "stack") +
+    labs(x = "년-월", y = "발송량(itemSum 합계)", fill = "구분", title = "월별 전체 발송건수") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+} else {
+  cat("표시할 데이터가 없습니다.")
+}
+```
+
+# REQ 실적 {.tabset}
+
+## 종건/예건/전체 요약
+```{r}
+summarize_jongye(req_df) |> kbl(align = "c") |>
+  kable_styling(bootstrap_options = c("striped", "bordered"), full_width = FALSE) |>
+  row_spec(0, bold = TRUE, background = "#f2f2f2")
+```
+
+## 월별 workplace 집계
+```{r}
+monthly_workplace(req_df) |> kbl(align = "c") |>
+  kable_styling(bootstrap_options = c("striped", "bordered", "hover")) |>
+  row_spec(0, bold = TRUE, background = "#f2f2f2")
+```
+
+## 올해 누적 (workplace)
+```{r}
+yearly_workplace(req_df, params$report_year) |> kbl(align = "c") |>
+  kable_styling(bootstrap_options = c("striped", "bordered")) |>
+  row_spec(0, bold = TRUE, background = "#f2f2f2")
+```
+
+## TOP10 Workplace
+```{r}
+top10_workplace(req_df) |> kbl(align = "c") |>
+  kable_styling(bootstrap_options = c("striped", "bordered")) |>
+  row_spec(0, bold = TRUE, background = "#f2f2f2")
+```
+
+## TOP10 (비고 기준)
+```{r}
+top10_note(req_df) |> kbl(align = "c") |>
+  kable_styling(bootstrap_options = c("striped", "bordered")) |>
+  row_spec(0, bold = TRUE, background = "#f2f2f2")
+```
+
+## 항목별 건수
+```{r}
+item_totals(req_df) |> kbl(align = "c") |>
+  kable_styling(bootstrap_options = c("striped", "bordered")) |>
+  row_spec(0, bold = TRUE, background = "#f2f2f2")
+```
+
+# KNX 실적 {.tabset}
+
+## 종건/예건/전체 요약
+```{r}
+summarize_jongye(knx_df) |> kbl(align = "c") |>
+  kable_styling(bootstrap_options = c("striped", "bordered"), full_width = FALSE) |>
+  row_spec(0, bold = TRUE, background = "#f2f2f2")
+```
+
+## 월별 workplace 집계
+```{r}
+monthly_workplace(knx_df) |> kbl(align = "c") |>
+  kable_styling(bootstrap_options = c("striped", "bordered", "hover")) |>
+  row_spec(0, bold = TRUE, background = "#f2f2f2")
+```
+
+## 올해 누적 (workplace)
+```{r}
+yearly_workplace(knx_df, params$report_year) |> kbl(align = "c") |>
+  kable_styling(bootstrap_options = c("striped", "bordered")) |>
+  row_spec(0, bold = TRUE, background = "#f2f2f2")
+```
+
+## TOP10 Workplace
+```{r}
+top10_workplace(knx_df) |> kbl(align = "c") |>
+  kable_styling(bootstrap_options = c("striped", "bordered")) |>
+  row_spec(0, bold = TRUE, background = "#f2f2f2")
+```
+
+## TOP10 (비고 기준)
+```{r}
+top10_note(knx_df) |> kbl(align = "c") |>
+  kable_styling(bootstrap_options = c("striped", "bordered")) |>
+  row_spec(0, bold = TRUE, background = "#f2f2f2")
+```
+
+## 항목별 건수
+```{r}
+item_totals(knx_df) |> kbl(align = "c") |>
+  kable_styling(bootstrap_options = c("striped", "bordered")) |>
+  row_spec(0, bold = TRUE, background = "#f2f2f2")
+```
+
+# HGC 발송현황
+
+기간(periodStart/periodEnd)별로 시트를 나누고, 최신 기간이 먼저 오도록 정렬합니다.
+
+```{r hgc-periods, results='asis'}
+if (nrow(hgc_df) == 0) {
+  cat("표시할 HGC 데이터가 없습니다.")
+} else {
+  period_groups <- hgc_df |>
+    distinct(periodStart, periodEnd) |>
+    arrange(desc(periodStart))
+
+  for (i in seq_len(nrow(period_groups))) {
+    ps <- period_groups$periodStart[i]
+    pe <- period_groups$periodEnd[i]
+    sheet_name <- sprintf("%d.%d-%d.%d",
+                           month(as.Date(ps)), day(as.Date(ps)),
+                           month(as.Date(pe)), day(as.Date(pe)))
+
+    cat(sprintf("\n\n## %s\n\n", sheet_name))
+
+    df_period <- hgc_df |> filter(periodStart == ps, periodEnd == pe)
+    tbl <- build_hgc_sheet_table(df_period)
+    print(render_hgc_sheet(tbl))
+  }
+}
+```
