@@ -22,7 +22,7 @@
             <div class="logo-icon"><i class="fas fa-heartbeat"></i></div>
             <div class="logo-text">
                 <span class="logo-main">기업건강의학센터</span>
-                <span class="logo-sub">업무 현황 대시보드</span>
+                <span class="logo-sub">업무 현황 대시보드 Version [0.1.0] 2026‑07‑30 </span>
             </div>
         </div>
         <div class="header-right">
@@ -101,7 +101,7 @@
 
     <!-- ══ 섹션 B : KNX 발송 ══ -->
     <div class="section-title-bar">
-        <div class="section-tag tag-blue">KNX 발송</div>
+        <div class="section-tag tag-blue">Knox 발송</div>
         <span class="sheet-status" id="knxSheetStatus">미로드</span>
     </div>
     
@@ -157,7 +157,7 @@
     <div class="charts-grid three-col mb8">
         <div class="chart-card wide-2">
             <div class="chart-header">
-                <h3><i class="fas fa-chart-bar"></i> KNX 월별 전송 건수</h3>
+                <h3><i class="fas fa-chart-bar"></i> Knox 월별 전송 건수</h3>
             </div>
             <div style="height:240px"><canvas id="v_knxMonthlyChart"></canvas></div>
         </div>
@@ -257,7 +257,7 @@
                 <h3><i class="fas fa-chart-line"></i> 월별 통합 건수 추이</h3>
                 <div class="chart-legend">
                     <span class="legend-item"><span class="dot green"></span>정기 발송</span>
-                    <span class="legend-item"><span class="dot blue"></span>KNX</span>
+                    <span class="legend-item"><span class="dot blue"></span>Knox 발송</span>
                     <span class="legend-item"><span class="dot orange"></span>자료요청</span>
                 </div>
             </div>
@@ -281,7 +281,7 @@
                 <i class="fas fa-calendar-week"></i>
                 <div>
                     <strong>2주 정기 발송 입력</strong>
-                    <span>이메일 대신 여기에 기록하세요</span>
+                    <span>TBD: 직접 입력 대신 자동으로... </span>
                 </div>
             </div>
             <div class="mini-kpi-row">
@@ -377,8 +377,8 @@
             <div class="upload-section-header blue">
                 <i class="fas fa-database"></i>
                 <div>
-                    <strong>KNX / 자료요청 데이터 현황</strong>
-                    <span>convert.exe 실행 후 data/ 폴더를 NAS에 복사하세요</span>
+                    <strong>Knox / 자료요청 데이터 현황</strong>
+                    <span>Data생성기_260723.R 실행 시, Data/ 폴더 데이터가 저장됩니다. 데이터를 자동으로 가져옵니다.</span>
                 </div>
             </div>
 
@@ -387,7 +387,7 @@
                 <div class="sheet-result-card" id="sheetResult1">
                     <div class="sheet-result-icon blue"><i class="fas fa-paper-plane"></i></div>
                     <div class="sheet-result-body">
-                        <div class="sheet-result-name">KNX 발송</div>
+                        <div class="sheet-result-name">Knox 발송</div>
                         <div class="sheet-result-count" id="sheet1Count">-</div>
                         <div class="sheet-result-status" id="sheet1Status">확인 중</div>
                     </div>
@@ -406,17 +406,17 @@
             <div class="upload-guide">
                 <div class="guide-title"><i class="fas fa-terminal"></i> 데이터 갱신 방법</div>
                 <ol class="guide-steps">
-                    <li><i class="fas fa-file-excel" style="color:#1d6f42"></i> <strong>업무현황.xlsx</strong> 편집 후 저장</li>
-                    <li><i class="fas fa-cog" style="color:var(--blue)"></i> <strong>convert.exe</strong> 더블클릭 실행</li>
-                    <li><i class="fas fa-copy" style="color:var(--teal)"></i> <strong>data/</strong> 폴더를 NAS에 덮어쓰기 복사</li>
+                    <li><i class="fas fa-file-excel" style="color:#1d6f42"></i> <strong>[기업건강연구소]업무 실적_2026년~.xlsx</strong> 저장 </li>
+                    <li><i class="fas fa-cog" style="color:var(--blue)"></i> <strong>S-even에서 거래처별 사후관리 집계 </strong> 다운로드 </li>
+                    <li><i class="fas fa-copy" style="color:var(--teal)"></i> <strong>Data생성기_260723.R </strong> 실행</li>
                     <li><i class="fas fa-sync" style="color:var(--green)"></i> 브라우저에서 <kbd>F5</kbd> 새로고침</li>
                 </ol>
             </div>
 
-            <!-- KNX 테이블 -->
+            <!-- Knox 테이블 -->
             <div class="mini-table-section">
                 <div class="table-header">
-                    <h4><i class="fas fa-paper-plane" style="color:var(--blue)"></i> KNX 발송 상세</h4>
+                    <h4><i class="fas fa-paper-plane" style="color:var(--blue)"></i> Knox 발송 상세</h4>
                     <div class="table-controls">
                         <input type="text" id="knxSearch" placeholder="검색..." class="search-input sm">
                         <span class="row-count" id="knxRowCount">0건</span>
@@ -467,7 +467,6 @@
         </section>
     </div>
 </div>
-</main>
 
 <!-- ============================================================
      TAB 3 : 기타 업무 (비만·SWI·옴부즈만)
@@ -676,7 +675,6 @@
     </div><!-- /etc-grid -->
 </div>
 </main>
-
 <!-- ===== 삭제 확인 모달 ===== -->
 <div class="modal-overlay" id="deleteModal" style="display:none">
     <div class="modal small">
@@ -694,5 +692,3 @@
 <script src="js/main.js"></script>
 </body>
 </html>
-
-
