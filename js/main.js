@@ -200,24 +200,32 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // HGC 테이블
     function renderHgcTable() {
-        const tbody = document.getElementById('hgcTableBody');
-        if (!window.hgcData) return;
+        // 정기 전송(비주기) 입력 목록의 테이블 ID는 'biweeklyTableBody' 입니다.
+        const tbody = document.getElementById('biweeklyTableBody');
+        if (!window.hgcData || window.hgcData.length === 0) return;
+        if (!tbody) {
+            console.warn('renderHgcTable: biweeklyTableBody 요소를 찾을 수 없습니다. (id 확인 필요)');
+            return;
+        }
 
         tbody.innerHTML = '';
         window.hgcData.forEach(item => {
             const tr = document.createElement('tr');
+            const period = item.건진기간 || '';
             tr.innerHTML = `
-                <td><span class="badge ${item.상태 === '완료' ? 'badge-green' : 'badge-yellow'}">${item.상태}</span></td>
-                <td>${item.파일일자}</td>
-                <td>${item.종예건}</td>
-                <td>${item.건진기간}</td>
-                <td>${item.거래처명}</td>
-                <td style="text-align:center"><strong>${item.접수건수}</strong></td>
-                <td>${item.노동부보고}</td>
+                <td>${item.파일일자 || ''}</td>
+                <td>${item.종예건 || item.항목 || ''}</td>
+                <td>${period}</td>
+                <td>${item.종건 || 0}</td>
+                <td>${item.예건 || 0}</td>
+                <td><strong>${item.합계 || item.접수건수 || 0}</strong></td>
+                <td>${item.비고 || ''}</td>
+                <td><button class="act-btn act-delete">삭제</button></td>
             `;
             tbody.appendChild(tr);
         });
-        document.getElementById('bwRowCount').textContent = `${window.hgcData.length}건`;
+        const bwCountEl = document.getElementById('bwRowCount');
+        if (bwCountEl) bwCountEl.textContent = `${window.hgcData.length}건`;
     }
 
     // 간단 차트 초기화 (샘플)
@@ -240,6 +248,6 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
-    // 초�� 렌더링 (setTimeout 안에서 호출됨)
+    // 초깃 렌더링 (setTimeout 안에서 호출됨)
     console.log('✅ 대시보드 초기화 완료!');
 }); // DOMContentLoaded 끝
